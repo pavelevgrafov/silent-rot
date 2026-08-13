@@ -1,0 +1,22 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local agent config, not for the published repo
+.claude/
+
+# Personal planning material — see the github-publish checklist
+BACKLOG.md
+PROGRESS.md
+NOTES*.md
+TODO*.md
+*.draft.md
+
+# Local proof that the mutation test passed *here*. Never published: a receipt
+# carried in from someone else's machine would tell you the checks work when
+# you have not run them — the exact false confidence this repo exists to fight.
+checks/.mutation-receipt.json
