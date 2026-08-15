@@ -48,6 +48,22 @@ Each finding carries a stable rule id:
 
 `warning` is a fact the checker established and you can act on; `info` is a fact whose significance only you can settle — a hand-written count may be right, a parked queue row may be parked on purpose. The id is what stays put: message wording changes between releases, `SR-REF-001` does not, so it is what to grep for, script against, and cite in a bug report.
 
+Every run ends with what was looked at, class by class:
+
+```text
+coverage:
+  paths   41 discovered, 38 checked, 3 skipped (Owner/Repo slug, not a path on disk 2, document marks it as planned 1) — paths declared in documents
+  queues   6 discovered, 5 checked, 1 skipped (pending row carries no date 1) — pending queue rows
+```
+
+A class the scan never reached prints its zero rather than being left out, and a pending row with no date is counted as unchecked rather than as fine. Read the skipped column before you read the findings: a clean report from a scan that checked nothing is the failure this repo is named after.
+
+For a machine, `--format json` writes exactly one object on stdout — `tool`, `root`, `started_at`, `summary`, `coverage`, `findings` — and every human-readable diagnostic to stderr, so the output can be piped straight into a parser:
+
+```bash
+python3 checks/liveness.py ~/work --format json | jq '.summary.by_rule'
+```
+
 This scan **never runs anything it finds.** Hooks are read, not executed, and the report says so on its own line:
 
 ```text
