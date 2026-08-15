@@ -59,57 +59,25 @@ def build_fixture(root: Path) -> Path:
     return ws
 
 
-def run(ws: Path) -> set[str]:
-    r = subprocess.run([sys.executable, str(CHECKER), str(ws)],
-                       capture_output=True, text=True, timeout=120)
+def run(ws: Path, execute: bool = False) -> set[str]:
+    argv = [sys.executable, str(CHECKER), str(ws)]
+    if execute:
+        argv += ["--execute-hooks", "--trusted-root", str(ws)]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     return {l.strip().lstrip("— ").strip()
             for l in r.stdout.splitlines() if l.strip().startswith("—")}
+
+
+def report(ws: Path, execute: bool = False) -> str:
+    argv = [sys.executable, str(CHECKER), str(ws)]
+    if execute:
+        argv += ["--execute-hooks", "--trusted-root", str(ws)]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120).stdout
 
 
 LONG_RULE = ("Every hypothesis gets a kill criterion before the test starts, "
              "with the number and the deadline written down in advance.\n")
 OLD = (date.today() - timedelta(days=90)).isoformat()
-
-MUTATIONS = [
-    ("declared path does not exist",
-     lambda ws: (ws / "beta" / "CLAUDE.md").write_text(
-         "# beta\n\nSee `docs/handbook.md`.\n", encoding="utf-8"),
-     "declared but missing"),
-
-    ("hook declared, file absent",
-     lambda ws: (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").unlink(),
-     "hook does not exist"),
-
-    ("hook exits non-zero",
-     lambda ws: (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").write_text(
-         "#!/bin/bash\nexit 3\n", encoding="utf-8"),
-     "hook fails"),
-
-    ("settings file is not valid JSON",
-     lambda ws: (ws / "alpha" / ".claude" / "settings.json").write_text(
-         "{ broken", encoding="utf-8"),
-     "BROKEN JSON"),
-
-    ("declared folder is empty",
-     lambda ws: (ws / "alpha" / "artifacts").mkdir(),
-     "declared folder is empty"),
-
-    ("queue row has gone stale",
-     lambda ws: (ws / "alpha" / "queue.md").write_text(
-         f"| Date | Item | Status |\n|---|---|---|\n| {OLD} | thing | unprocessed |\n",
-         encoding="utf-8"),
-     "unprocessed for"),
-
-    ("hand-written count in an instruction file",
-     lambda ws: (ws / "beta" / "CLAUDE.md").write_text(
-         "# beta\n\nThis workspace holds 15 projects.\n", encoding="utf-8"),
-     "hand-written count"),
-
-    ("stateful hook is not consumed by the audit",
-     lambda ws: _stateful(ws),
-     None),  # asserted separately, see below
-]
-
 
 def _stateful(ws: Path) -> None:
     """A nudge that reports only on change, plus a state file holding a stale
@@ -123,32 +91,132 @@ def _stateful(ws: Path) -> None:
         encoding="utf-8")
 
 
+def _hostile(ws: Path) -> None:
+    """The hook a stranger's repository ships: it writes outside the tree being
+    scanned. Until v0.1.1 a plain scan ran this."""
+    (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").write_text(
+        f'#!/bin/bash\ntouch "{ws.parent / "SENTINEL"}"\necho \'{{"continue": true}}\'\n',
+        encoding="utf-8")
+
+
+def _shell_operator(ws: Path) -> None:
+    """A command the checker must refuse to interpret rather than guess at."""
+    hook = ws / "alpha" / ".claude" / "hooks" / "nudge.sh"
+    (ws / "alpha" / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": f'cat /etc/hosts | "{hook}"'}]}]}}),
+        encoding="utf-8")
+
+
+def _outside_root(ws: Path) -> None:
+    """A hook that exists, is healthy, and is not in the tree being scanned:
+    the scan may not claim to have checked it."""
+    outside = ws.parent / "elsewhere.sh"
+    outside.write_text('#!/bin/bash\necho \'{"continue": true}\'\n', encoding="utf-8")
+    outside.chmod(0o755)
+    (ws / "alpha" / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": f'bash "{outside}"'}]}]}}),
+        encoding="utf-8")
+
+
+def _no_sentinel(ws: Path) -> bool:
+    return not (ws.parent / "SENTINEL").exists()
+
+
+# Each case: what is broken, how, and what proves the checker noticed. `mode`
+# picks the plain scan or the explicit trusted run; `check` replaces the
+# substring assertion when the evidence is a side effect rather than a line.
+MUTATIONS = [
+    dict(name="declared path does not exist",
+         mutate=lambda ws: (ws / "beta" / "CLAUDE.md").write_text(
+             "# beta\n\nSee `docs/handbook.md`.\n", encoding="utf-8"),
+         expect="declared but missing"),
+
+    dict(name="hook declared, file absent",
+         mutate=lambda ws: (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").unlink(),
+         expect="hook does not exist"),
+
+    dict(name="hook exits non-zero",
+         mutate=lambda ws: (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").write_text(
+             "#!/bin/bash\nexit 3\n", encoding="utf-8"),
+         expect="hook fails", mode="execute"),
+
+    dict(name="settings file is not valid JSON",
+         mutate=lambda ws: (ws / "alpha" / ".claude" / "settings.json").write_text(
+             "{ broken", encoding="utf-8"),
+         expect="BROKEN JSON"),
+
+    dict(name="declared folder is empty",
+         mutate=lambda ws: (ws / "alpha" / "artifacts").mkdir(),
+         expect="declared folder is empty"),
+
+    dict(name="queue row has gone stale",
+         mutate=lambda ws: (ws / "alpha" / "queue.md").write_text(
+             f"| Date | Item | Status |\n|---|---|---|\n| {OLD} | thing | unprocessed |\n",
+             encoding="utf-8"),
+         expect="unprocessed for"),
+
+    dict(name="hand-written count in an instruction file",
+         mutate=lambda ws: (ws / "beta" / "CLAUDE.md").write_text(
+             "# beta\n\nThis workspace holds 15 projects.\n", encoding="utf-8"),
+         expect="hand-written count"),
+
+    dict(name="stateful hook is not consumed by the audit",
+         mutate=_stateful, expect=None, mode="execute",
+         check=lambda ws: (ws / "alpha" / ".claude" / "nudge-last-count"
+                           ).read_text().strip() == "99"),
+
+    # v0.1.1. The first of these is the regression test for the defect this
+    # release exists to fix: a plain scan must not run what the tree declares.
+    dict(name="hostile hook is NOT run by a plain scan",
+         mutate=_hostile, expect=None, check=_no_sentinel),
+
+    dict(name="plain scan states that nothing was executed",
+         mutate=lambda ws: None, expect=None,
+         check=lambda ws: "0 executed" in report(ws)),
+
+    dict(name="shell operator in a hook command is refused, not interpreted",
+         mutate=_shell_operator, expect="not statically supported"),
+
+    dict(name="hook outside the scanned root is not executed",
+         mutate=_outside_root, expect="outside the trusted root", mode="execute",
+         check=_no_sentinel),
+]
+
+
 def main() -> int:
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp) / "pristine"
         base.mkdir()
-        baseline = run(build_fixture(base))
-        print(f"fixture baseline: {len(baseline)} problem(s)")
+        pristine = build_fixture(base)
+        # One baseline per mode: the trusted run reaches findings the plain scan
+        # cannot, so comparing an executed case against a static baseline would
+        # score the difference between the modes as a caught mutation.
+        baselines = {"static": run(pristine), "execute": run(pristine, execute=True)}
+        print(f"fixture baseline: {len(baselines['static'])} static, "
+              f"{len(baselines['execute'])} with hooks executed")
 
-        for name, mutate, expected in MUTATIONS:
+        for case in MUTATIONS:
+            name, mode = case["name"], case.get("mode", "static")
             work = Path(tmp) / "case"
             if work.exists():
                 shutil.rmtree(work)
             work.mkdir()
             ws = build_fixture(work)
-            mutate(ws)
-            new = run(ws) - baseline
+            case["mutate"](ws)
+            new = run(ws, execute=(mode == "execute")) - baselines[mode]
 
-            if expected is None:  # state-preservation case
-                state = ws / "alpha" / ".claude" / "nudge-last-count"
-                caught = state.read_text().strip() == "99"
-            else:
-                caught = any(expected in p for p in new)
+            caught = True
+            if case.get("expect"):
+                caught = any(case["expect"] in p for p in new)
+            if caught and case.get("check"):
+                caught = case["check"](ws)
 
-            print(f"  {'caught ' if caught else 'MISSED '} {name}")
+            print(f"  {'caught ' if caught else 'MISSED '} {name} [{mode}]")
             if not caught:
-                failures.append((name, expected, sorted(new)))
+                failures.append((name, case.get("expect"), sorted(new)))
 
     if failures:
         print(f"\nmutations not caught: {len(failures)}/{len(MUTATIONS)}")
