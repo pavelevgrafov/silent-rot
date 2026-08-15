@@ -78,6 +78,27 @@ python3 checks/liveness.py ~/work --execute-hooks --trusted-root ~/work
 
 Both flags are required and must name the same directory, so no single forgotten flag turns a scan into an execution. Hooks then run without a shell, with a minimal environment (no API tokens from your session), with a 25-second timeout, and with their state files restored afterwards — an audit that consumes a nudge's "already reported" flag silences the next real notification.
 
+## Four settings, and no file until you need one
+
+Everything works with no configuration. When the defaults do not match your workspace, put `.silent-rot.toml` in the scan root:
+
+```toml
+instruction_files = ["CLAUDE.md", "AGENTS.md", "README.md"]
+pending_statuses  = ["unprocessed", "pending", "todo", "не обработано"]
+stale_days        = 14
+exclude_globs     = ["**/.git/**", "**/node_modules/**", "**/.venv/**"]
+```
+
+That is the entire surface. These four are what actually differs between workspaces, and `pending_statuses` is the one that matters most: **a queue whose rows say `todo` is invisible to a checker looking for `unprocessed`, and the scan reports a clean run** — this project's own failure mode, performed by this project. Every run therefore prints the vocabulary it used:
+
+```text
+config: .silent-rot.toml applied for pending_statuses, stale_days; pending statuses in force: todo, blocked
+```
+
+A key that does nothing is reported rather than ignored — `pendingstatuses` misspelled, a string where a list belongs, an empty list that would switch a check off. Silently dropping it would leave a queue unwatched while its owner believes it is configured.
+
+**The config is data, never permission.** It is read out of the tree being scanned, so it is written by whoever wrote that tree. There is no key that enables hook execution, entries pointing outside the scan root are refused, and nothing in the file can widen what the scan may do — only narrow it.
+
 ## The scanned tree is untrusted data
 
 Everything in `ROOT` — settings files, hook commands, documents — is read as data written by someone else, including when that someone is you six months ago.

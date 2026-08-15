@@ -19,6 +19,7 @@ Exit code is 0 whether or not problems are found — this is a report, not a
 gate. Wire it into a hook or a weekly job and read the output.
 """
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -26,20 +27,28 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 VERSION = "0.2.0-dev"
 
-# Several patterns below carry both English and Russian alternatives on
-# purpose: instruction files and queue tables are often written in the author's
-# own language while the code around them is English, and a status word the
-# checker cannot match is the exact defect this repo is about. Add your own
-# language's words to those alternations.
-INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md", "README.md")
+# The four things that actually differ between workspaces, and nothing else.
+# A queue whose rows say `todo` is invisible to a checker looking for
+# `unprocessed`, and the run comes back clean — this project's own failure mode,
+# performed by this project. The defaults carry Russian alternatives on purpose:
+# instruction files and queue tables are often written in the author's language
+# while the code around them is English.
+DEFAULTS = {
+    "instruction_files": ["CLAUDE.md", "AGENTS.md", "README.md"],
+    "pending_statuses": ["unprocessed", "pending", "не обработано", "не разобрано"],
+    "stale_days": 14,
+    "exclude_globs": ["**/.git/**", "**/node_modules/**", "**/.venv/**"],
+}
+CONFIG_NAME = ".silent-rot.toml"
+
 STATE_GLOB = "*last*"          # files hooks use to remember what they reported
-STALE_DAYS = 14
 RECEIPT_NAME = ".mutation-receipt.json"
 RECEIPT_MAX_AGE_DAYS = 30
 
@@ -81,6 +90,8 @@ RULES = {
     "SR-SELFTEST-003": "warning",   # mutation test passed only in part
     "SR-SELFTEST-004": "warning",   # receipt older than the threshold
     "SR-SELFTEST-005": "warning",   # receipt attests to different code
+    "SR-CONFIG-001": "warning",     # config file present and unusable
+    "SR-CONFIG-002": "warning",     # a key in the config does nothing
 }
 
 # The files a passing mutation run actually attests to. Sorted and named, so
@@ -156,6 +167,117 @@ def seen(cls: str, n: int = 1) -> None:
     coverage[cls]["discovered"] += n
 
 
+def load_config(root: Path) -> tuple[dict, list[str]]:
+    """Read `.silent-rot.toml` from the scan root, if it is there at all.
+
+    Config is data, never permission. There is no key that turns on hook
+    execution, and there is no code path from this function to `--execute-hooks`
+    — a file inside the tree being scanned must never be able to widen what the
+    scan is allowed to do.
+
+    A key that does nothing is reported rather than dropped: `pendingstatuses`
+    silently ignored leaves the queue unwatched while its owner believes it is
+    configured, which is the failure this whole repo is about.
+    """
+    cfg = {k: (list(v) if isinstance(v, list) else v) for k, v in DEFAULTS.items()}
+    f = root / CONFIG_NAME
+    if not f.is_file():
+        return cfg, []
+    try:
+        raw = tomllib.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        add("SR-CONFIG-001", f"config unusable, scanning with defaults: {e}",
+            CONFIG_NAME)
+        return cfg, []
+
+    applied = []
+    for key, value in raw.items():
+        if key not in DEFAULTS:
+            add("SR-CONFIG-002", f"unknown key ignored: {key}", CONFIG_NAME)
+            continue
+        want = type(DEFAULTS[key])
+        if type(value) is not want:
+            add("SR-CONFIG-002",
+                f"{key} ignored: expected {want.__name__}, got {type(value).__name__}",
+                CONFIG_NAME)
+            continue
+        if want is list and not all(isinstance(x, str) for x in value):
+            add("SR-CONFIG-002", f"{key} ignored: every entry must be a string",
+                CONFIG_NAME)
+            continue
+        if key in ("instruction_files", "pending_statuses") and not value:
+            # An empty list would build a pattern that matches nothing (or, for
+            # a regex, everything). Either way the check stops meaning what its
+            # name says while still counting as configured.
+            add("SR-CONFIG-002",
+                f"{key} ignored: an empty list turns the check off silently",
+                CONFIG_NAME)
+            continue
+        if key == "stale_days" and (value < 0 or isinstance(value, bool)):
+            add("SR-CONFIG-002", f"{key} ignored: not a number of days: {value!r}",
+                CONFIG_NAME)
+            continue
+        if want is list and (bad := [x for x in value if escapes_root(x)]):
+            # The config is inside the tree being scanned, so it is written by
+            # whoever wrote that tree. It may narrow the scan, never point it
+            # somewhere else.
+            add("SR-CONFIG-002",
+                f"{key} ignored: entries may not leave the scan root: {bad}",
+                CONFIG_NAME)
+            continue
+        cfg[key] = value
+        applied.append(key)
+    return cfg, applied
+
+
+def escapes_root(entry: str) -> bool:
+    return (entry.startswith(("/", "~"))
+            or ".." in Path(entry).parts
+            or os.path.isabs(entry))
+
+
+@functools.lru_cache(maxsize=None)
+def glob_re(pattern: str) -> re.Pattern:
+    """`fnmatch` cannot tell `*` from `**`, and the difference is the whole
+    point of an exclude list: `*` stays inside one path segment, `**` crosses."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def excluded(p: Path, root: Path, cfg: dict) -> bool:
+    """True when the path, or any directory above it, is excluded."""
+    try:
+        rel_ = p.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    parts = rel_.split("/")
+    candidates = ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    for g in cfg["exclude_globs"]:
+        # "node_modules/**" is written to exclude the directory as well as its
+        # contents; matching only the contents would leave the folder itself
+        # counted as a project.
+        for pattern in (g, g[:-3]) if g.endswith("/**") else (g,):
+            if any(glob_re(pattern).match(c) for c in candidates):
+                return True
+    return False
+
+
 def check(cls: str, n: int = 1) -> None:
     """Count every check actually performed. A check that never runs cannot
     find anything, and the count is the only way to notice that it didn't."""
@@ -184,21 +306,23 @@ def read_text(f: Path, cls: str) -> str | None:
         return None
 
 
-def projects(root: Path) -> list[Path]:
+def projects(root: Path, cfg: dict) -> list[Path]:
     # pathlib's glob matches dotted names, unlike the shell — without this
     # filter `.git` and `.claude` count as projects and every reference
     # resolves from the wrong root.
-    out = [d for d in root.glob("*") if d.is_dir() and not d.name.startswith(".")]
-    return out + [g / d.name for g in out for d in g.glob("*")
-                  if d.is_dir() and not d.name.startswith(".")]
+    def ok(d: Path) -> bool:
+        return d.is_dir() and not d.name.startswith(".") and not excluded(d, root, cfg)
+
+    out = [d for d in root.glob("*") if ok(d)]
+    return out + [g / d.name for g in out for d in g.glob("*") if ok(d)]
 
 
 # 1. Settings files parse. A malformed one disables every setting it holds —
 #    hooks included — and nothing announces it.
-def check_settings_valid(root: Path) -> list[Path]:
+def check_settings_valid(root: Path, cfg: dict) -> list[Path]:
     found = []
     for p in root.glob("**/.claude/settings*.json"):
-        if "node_modules" in p.parts:
+        if excluded(p, root, cfg):
             continue
         text = read_text(p, "settings")
         if text is None:
@@ -332,12 +456,12 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
 #    each learned by getting it wrong: resolve inside the file's own project
 #    (not a neighbour's), treat a folder the document itself marks as planned
 #    as honest, and accept a path qualified by prose on the same line.
-def check_paths(root: Path) -> None:
+def check_paths(root: Path, cfg: dict) -> None:
     pat = re.compile(r"`([^`\s]+?/[^`\s]*|[^`\s]+?\.(?:md|sh|py|json|ya?ml))`")
     planned = re.compile(r"not created|planned|future|later|не создан|планир")
-    names = {p.name for p in projects(root)}
-    files = [f for pr in [root] + projects(root)
-             for n in INSTRUCTION_FILES if (f := pr / n).is_file()]
+    names = {p.name for p in projects(root, cfg)}
+    files = [f for pr in [root] + projects(root, cfg)
+             for n in cfg["instruction_files"] if (f := pr / n).is_file()]
     for f in files:
         text = read_text(f, "paths")
         if text is None:
@@ -386,8 +510,8 @@ def check_paths(root: Path) -> None:
 
 # 4. A folder a document presents as part of the structure, that exists and is
 #    empty, is a promise nobody kept.
-def check_declared_but_empty(root: Path) -> None:
-    for pr in projects(root):
+def check_declared_but_empty(root: Path, cfg: dict) -> None:
+    for pr in projects(root, cfg):
         for d in pr.glob("*"):
             if not d.is_dir() or d.name.startswith("."):
                 continue
@@ -399,11 +523,12 @@ def check_declared_but_empty(root: Path) -> None:
 
 # 5. Rows in a queue that have sat unprocessed long enough that "parked on
 #    purpose" and "forgotten" stop being distinguishable.
-def check_stale_rows(root: Path) -> None:
-    pending = re.compile(r"unprocessed|pending|не (обработано|разобрано)", re.I)
+def check_stale_rows(root: Path, cfg: dict) -> None:
+    pending = re.compile("|".join(re.escape(s) for s in cfg["pending_statuses"]), re.I)
     datep = re.compile(r"(\d{4}-\d{2}-\d{2})")
+    stale_days = cfg["stale_days"]
     for f in root.rglob("*.md"):
-        if "node_modules" in f.parts or ".git" in f.parts:
+        if excluded(f, root, cfg):
             continue
         text = read_text(f, "queues")
         if text is None:
@@ -430,14 +555,14 @@ def check_stale_rows(root: Path) -> None:
                 continue
             check("queues")
             age = (date.today() - when).days
-            if age >= STALE_DAYS:
+            if age >= stale_days:
                 stale.append((age, n))
         if stale:
             oldest, oldest_line = max(stale)
             # The line of the oldest row, not of the first: the reader opening
             # the file wants the row that has been waiting longest.
             add("SR-QUEUE-001",
-                f"{len(stale)} row(s) unprocessed for {STALE_DAYS}+ days "
+                f"{len(stale)} row(s) unprocessed for {stale_days}+ days "
                 f"(oldest {oldest})",
                 rel(f, root), oldest_line)
 
@@ -445,12 +570,12 @@ def check_stale_rows(root: Path) -> None:
 # 6. A number written into a document that the reader could count. Reported as
 #    a candidate, never as a verdict — the point is to delete the sentence, not
 #    to correct the number.
-def check_manual_counters(root: Path) -> None:
+def check_manual_counters(root: Path, cfg: dict) -> None:
     pat = re.compile(r"\b(\d{1,4})\s+(projects?|repos?|repositories|files?|"
                      r"skills?|folders?|проект\w*|репозитор\w*|файл\w*|папк\w*)",
                      re.I)
-    for pr in [root] + projects(root):
-        for n in INSTRUCTION_FILES:
+    for pr in [root] + projects(root, cfg):
+        for n in cfg["instruction_files"]:
             f = pr / n
             if not f.is_file():
                 continue
@@ -548,7 +673,21 @@ def coverage_lines() -> list[str]:
     return out
 
 
-def as_json(root: Path, started_at: str, execute: bool) -> str:
+def config_summary(cfg: dict, applied: list[str]) -> str:
+    """What this run was actually looking for.
+
+    A scan for `unprocessed` over a queue that says `todo` reports nothing and
+    looks identical to a clean one. The vocabulary in force is therefore part of
+    the result, not a setting the reader has to go and look up."""
+    if not applied:
+        return (f"config: defaults ({', '.join(DEFAULTS)}) — "
+                f"no {CONFIG_NAME} applied in the scan root")
+    return (f"config: {CONFIG_NAME} applied for {', '.join(sorted(applied))}; "
+            f"pending statuses in force: {', '.join(cfg['pending_statuses'])}")
+
+
+def as_json(root: Path, started_at: str, execute: bool,
+            cfg: dict, applied: list[str]) -> str:
     by_rule: dict[str, int] = {}
     by_severity: dict[str, int] = {}
     for f in findings:
@@ -560,6 +699,10 @@ def as_json(root: Path, started_at: str, execute: bool) -> str:
         "started_at": started_at,
         "summary": {
             "mode": "execute-hooks" if execute else "static",
+            # The profile in force, not the file on disk: what the scan looked
+            # for is part of what the scan found.
+            "config": {"source": CONFIG_NAME if applied else "defaults",
+                       "applied": sorted(applied), "profile": cfg},
             "checks": sum(c["checked"] for c in coverage.values()),
             "findings": len(findings),
             "by_severity": dict(sorted(by_severity.items())),
@@ -614,19 +757,21 @@ def main() -> int:
                  f"  trusted root: {Path(args.trusted_root).resolve()}")
             return 2
 
-    settings = check_settings_valid(root)
+    cfg, applied = load_config(root)
+    settings = check_settings_valid(root, cfg)
     check_hooks(root, settings, execute)
-    check_paths(root)
-    check_declared_but_empty(root)
-    check_stale_rows(root)
-    check_manual_counters(root)
+    check_paths(root, cfg)
+    check_declared_but_empty(root, cfg)
+    check_stale_rows(root, cfg)
+    check_manual_counters(root, cfg)
     check_mutation_receipt()
 
     if args.format == "json":
-        print(as_json(root, started_at, execute))
+        print(as_json(root, started_at, execute, cfg, applied))
         return 0
 
     print(f"checks run: {sum(c['checked'] for c in coverage.values())}")
+    print(config_summary(cfg, applied))
     print(hook_summary(execute))
     print("coverage:")
     for line in coverage_lines():
