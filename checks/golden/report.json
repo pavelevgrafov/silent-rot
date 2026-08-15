@@ -1,0 +1,112 @@
+{
+  "tool": {
+    "name": "silent-rot",
+    "version": "<VERSION>"
+  },
+  "root": "<ROOT>",
+  "started_at": "<TIMESTAMP>",
+  "summary": {
+    "mode": "static",
+    "checks": 9,
+    "findings": 5,
+    "by_severity": {
+      "info": 3,
+      "warning": 2
+    },
+    "by_rule": {
+      "SR-COUNT-001": 1,
+      "SR-EMPTY-001": 1,
+      "SR-QUEUE-001": 1,
+      "SR-REF-001": 1,
+      "SR-SELFTEST-001": 1
+    }
+  },
+  "coverage": {
+    "settings": {
+      "discovered": 1,
+      "checked": 1,
+      "skipped": 0,
+      "skipped_reasons": {}
+    },
+    "hooks": {
+      "discovered": 1,
+      "checked": 1,
+      "skipped": 0,
+      "skipped_reasons": {},
+      "inspected_statically": 1,
+      "executed": 0,
+      "unsupported": 0,
+      "outside": 0,
+      "missing": 0
+    },
+    "paths": {
+      "discovered": 2,
+      "checked": 2,
+      "skipped": 0,
+      "skipped_reasons": {}
+    },
+    "folders": {
+      "discovered": 1,
+      "checked": 1,
+      "skipped": 0,
+      "skipped_reasons": {}
+    },
+    "queues": {
+      "discovered": 2,
+      "checked": 1,
+      "skipped": 1,
+      "skipped_reasons": {
+        "pending row carries no date": 1
+      }
+    },
+    "counters": {
+      "discovered": 2,
+      "checked": 2,
+      "skipped": 0,
+      "skipped_reasons": {}
+    },
+    "selftest": {
+      "discovered": 1,
+      "checked": 1,
+      "skipped": 0,
+      "skipped_reasons": {}
+    }
+  },
+  "findings": [
+    {
+      "rule": "SR-REF-001",
+      "severity": "warning",
+      "path": "beta/CLAUDE.md",
+      "line": 3,
+      "message": "declared but missing: docs/handbook.md"
+    },
+    {
+      "rule": "SR-EMPTY-001",
+      "severity": "info",
+      "path": "alpha/artifacts",
+      "line": null,
+      "message": "declared folder is empty"
+    },
+    {
+      "rule": "SR-QUEUE-001",
+      "severity": "info",
+      "path": "alpha/queue.md",
+      "line": 3,
+      "message": "1 row(s) unprocessed for 14+ days (oldest 90)"
+    },
+    {
+      "rule": "SR-COUNT-001",
+      "severity": "info",
+      "path": "beta/CLAUDE.md",
+      "line": 3,
+      "message": "hand-written count to verify: \"15 projects\""
+    },
+    {
+      "rule": "SR-SELFTEST-001",
+      "severity": "warning",
+      "path": ".mutation-receipt.json",
+      "line": null,
+      "message": "mutation test has never passed here — run test_liveness.py"
+    }
+  ]
+}

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Coverage per class, and a report a machine can read
+
+`--format json` writes one object on stdout and nothing else; diagnostics go to stderr, so a failed run cannot land in the middle of a parser's input. The document carries `tool`, `root`, `started_at`, `summary`, `coverage` and `findings`.
+
+Coverage is now reported for every class the checker knows — settings files, hooks, declared paths, folders, queue rows, instruction files, its own receipt — as discovered / checked / skipped, with the reason for each skip. 0.1.1 did this for hooks only, on the argument that a hook merely read is not a hook proved to run. The same argument covers the rest: a pending queue row with no date cannot be aged, a file that will not open cannot be checked, and until now both were silently absent from the count. A class that found nothing still prints its line.
+
+Three acceptance checks now gate the receipt alongside the mutations: the JSON and text renderings must report the same numbers, JSON mode must keep stdout parseable (verified by making a run fail on purpose), and the report shape is compared against a golden file with the clock and the temporary root masked. Each was confirmed to fail when the property it watches is broken.
+
+Two crashes found while adding the counters: a queue row dated `2026-13-45` matched the date shape and took down the whole scan, and an unreadable file did the same. Both are now skips with a reason.
+
 ### Findings have stable ids, and the self-test asserts them
 
 Every finding now renders as `[severity] SR-AREA-NNN path:line — message`. The id is the part that does not move; the message is prose and will be rewritten.

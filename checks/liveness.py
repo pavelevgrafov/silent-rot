@@ -26,8 +26,10 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
+
+VERSION = "0.2.0-dev"
 
 # Several patterns below carry both English and Russian alternatives on
 # purpose: instruction files and queue tables are often written in the author's
@@ -94,9 +96,27 @@ class Finding:
         return f"[{self.severity}] {self.rule}{where} — {self.message}"
 
 
+# The classes of object this checker knows how to look at, and what each one
+# counts. A single "checks run: 41" cannot say that an entire class was skipped,
+# and a class nobody looked at reads exactly like a class that came back clean —
+# which is the defect this repo is named after, committed by the tool itself.
+CLASSES = {
+    "settings": "settings files",
+    "hooks": "hook commands",
+    "paths": "paths declared in documents",
+    "folders": "folders inside projects",
+    "queues": "pending queue rows",
+    "counters": "instruction files scanned for counts",
+    "selftest": "this checker's own mutation receipt",
+}
+
 findings: list[Finding] = []
-checks = 0
-coverage = {"found": 0, "inspected": 0, "executed": 0, "unsupported": 0, "outside": 0}
+coverage = {c: {"discovered": 0, "checked": 0, "skipped": 0, "skipped_reasons": {}}
+            for c in CLASSES}
+# Hooks carry their own breakdown: "checked" for a hook means read, and reading
+# a hook proves nothing about whether it runs.
+coverage["hooks"] |= {"inspected_statically": 0, "executed": 0,
+                      "unsupported": 0, "outside": 0, "missing": 0}
 
 
 def add(rule: str, message: str, path: str = "", line: int | None = None) -> None:
@@ -105,11 +125,36 @@ def add(rule: str, message: str, path: str = "", line: int | None = None) -> Non
     findings.append(Finding(rule, RULES[rule], message, path, line))
 
 
-def check(_label: str) -> None:
+def seen(cls: str, n: int = 1) -> None:
+    coverage[cls]["discovered"] += n
+
+
+def check(cls: str, n: int = 1) -> None:
     """Count every check actually performed. A check that never runs cannot
     find anything, and the count is the only way to notice that it didn't."""
-    global checks
-    checks += 1
+    coverage[cls]["checked"] += n
+
+
+def skip(cls: str, reason: str, n: int = 1) -> None:
+    """An object discovered and then not checked. Recorded with its reason,
+    because "skipped 3" that nobody can explain is not better than silence."""
+    coverage[cls]["skipped"] += n
+    coverage[cls]["skipped_reasons"][reason] = \
+        coverage[cls]["skipped_reasons"].get(reason, 0) + n
+
+
+def read_text(f: Path, cls: str) -> str | None:
+    """A file that could not be opened is a file that was not checked.
+
+    The failure counts as one discovered-and-skipped unit of its class, even
+    where the class otherwise counts spans or rows: `discovered = checked +
+    skipped` has to hold, or the numbers cannot be read at a glance."""
+    try:
+        return f.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        seen(cls)
+        skip(cls, f"unreadable: {type(e).__name__}")
+        return None
 
 
 def projects(root: Path) -> list[Path]:
@@ -128,11 +173,17 @@ def check_settings_valid(root: Path) -> list[Path]:
     for p in root.glob("**/.claude/settings*.json"):
         if "node_modules" in p.parts:
             continue
+        text = read_text(p, "settings")
+        if text is None:
+            # Not added to `found`: the hook pass cannot read it either, and
+            # letting it through would count its hooks as inspected.
+            continue
         found.append(p)
-        check("settings json")
+        seen("settings")
+        check("settings")
         try:
-            json.loads(p.read_text(encoding="utf-8"))
-        except Exception as e:
+            json.loads(text)
+        except ValueError as e:
             add("SR-SETTINGS-001", f"settings file is not valid JSON: {e}",
                 rel(p, root), getattr(e, "lineno", None))
     return found
@@ -182,38 +233,39 @@ def classify_command(command: str, base: Path, root: Path) -> tuple[str, list[st
 def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
     before = {f: f.read_bytes() for d in root.glob("**/.claude")
               for f in d.glob(STATE_GLOB) if f.is_file()} if execute else {}
-    seen: set[str] = set()
+    declared: set[str] = set()
     for p in settings:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except (OSError, ValueError):
+            continue  # already reported by check_settings_valid
         for event, groups in (data.get("hooks") or {}).items():
             for group in groups:
                 for hook in group.get("hooks", []):
                     command = hook.get("command", "")
-                    if not command.strip() or command in seen:
+                    if not command.strip() or command in declared:
                         continue
-                    seen.add(command)
-                    check("hook")
-                    coverage["found"] += 1
+                    declared.add(command)
+                    seen("hooks")
+                    check("hooks")
                     kind, argv, resolved, note = classify_command(
                         command, p.parent, root)
 
                     if kind == "missing":
+                        coverage["hooks"]["missing"] += 1
                         add("SR-HOOK-001",
                             f"hook does not exist: {resolved} (event {event})",
                             rel(p, root))
                         continue
                     if kind == "unsupported":
-                        coverage["unsupported"] += 1
+                        coverage["hooks"]["unsupported"] += 1
                         add("SR-HOOK-002",
                             f"hook command not statically supported, not executed "
                             f"({note}): {command.strip()[:100]} (event {event})",
                             rel(p, root))
                         continue
                     if kind == "outside":
-                        coverage["outside"] += 1
+                        coverage["hooks"]["outside"] += 1
                         if execute:
                             add("SR-HOOK-003",
                                 f"hook outside the trusted root, not executed: "
@@ -221,10 +273,10 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                                 rel(p, root))
                         continue
 
-                    coverage["inspected"] += 1
+                    coverage["hooks"]["inspected_statically"] += 1
                     if not execute:
                         continue
-                    coverage["executed"] += 1
+                    coverage["hooks"]["executed"] += 1
                     try:
                         # Hooks are fed JSON on stdin; with no stdin a reader
                         # blocks forever and the check misreports it as a hang.
@@ -260,21 +312,31 @@ def check_paths(root: Path) -> None:
     files = [f for pr in [root] + projects(root)
              for n in INSTRUCTION_FILES if (f := pr / n).is_file()]
     for f in files:
-        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        text = read_text(f, "paths")
+        if text is None:
+            continue
+        lines = text.splitlines()
         # A folder marked planned on any one line is planned everywhere in that
         # document — the same folders get enumerated again in later sections.
-        skip = {raw for l in lines if planned.search(l.lower()) for raw in pat.findall(l)}
-        seen: set[str] = set()
+        deferred = {raw for l in lines if planned.search(l.lower())
+                    for raw in pat.findall(l)}
+        already: set[str] = set()
         for lineno, line in enumerate(lines, 1):
-            if planned.search(line.lower()):
-                continue
-            for raw in sorted(set(pat.findall(line)) - skip):
-                if raw in seen or raw.startswith(("http", "<", "{")):
+            for raw in sorted(set(pat.findall(line))):
+                if raw in already:
                     continue
-                seen.add(raw)
+                already.add(raw)
+                seen("paths")
+                if raw in deferred or planned.search(line.lower()):
+                    skip("paths", "document marks it as planned")
+                    continue
+                if raw.startswith(("http", "<", "{")):
+                    skip("paths", "not a path on disk")
+                    continue
                 if raw.count("/") == 1 and "." not in raw and not raw.endswith("/"):
-                    continue  # Owner/Repo slug, not a path on disk
-                check("declared path")
+                    skip("paths", "Owner/Repo slug, not a path on disk")
+                    continue
+                check("paths")
                 if raw.startswith(("~", "/")):
                     ok = Path(os.path.expanduser(raw)).exists()
                 elif "/" not in raw:
@@ -302,7 +364,8 @@ def check_declared_but_empty(root: Path) -> None:
         for d in pr.glob("*"):
             if not d.is_dir() or d.name.startswith("."):
                 continue
-            check("folder not empty")
+            seen("folders")
+            check("folders")
             if not any(d.rglob("*")):
                 add("SR-EMPTY-001", "declared folder is empty", rel(d, root))
 
@@ -315,18 +378,31 @@ def check_stale_rows(root: Path) -> None:
     for f in root.rglob("*.md"):
         if "node_modules" in f.parts or ".git" in f.parts:
             continue
-        text = f.read_text(encoding="utf-8", errors="replace")
+        text = read_text(f, "queues")
+        if text is None:
+            continue
         rows = [(n, l) for n, l in enumerate(text.splitlines(), 1)
                 if l.startswith("|") and pending.search(l)]
         if not rows:
             continue
-        check("stale rows")
         stale = []
         for n, l in rows:
+            seen("queues")
             m = datep.search(l)
             if not m:
+                # No date, no age: the row is pending and this checker cannot
+                # say for how long. Counted as unchecked, not as fine.
+                skip("queues", "pending row carries no date")
                 continue
-            age = (date.today() - date.fromisoformat(m.group(1))).days
+            try:
+                when = date.fromisoformat(m.group(1))
+            except ValueError:
+                # 2026-13-45 matches the shape and is not a date. Crashing here
+                # would take the whole scan down over one typo in one row.
+                skip("queues", "row date does not parse")
+                continue
+            check("queues")
+            age = (date.today() - when).days
             if age >= STALE_DAYS:
                 stale.append((age, n))
         if stale:
@@ -351,9 +427,12 @@ def check_manual_counters(root: Path) -> None:
             f = pr / n
             if not f.is_file():
                 continue
-            check("manual counter")
-            for lineno, line in enumerate(
-                    f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            text = read_text(f, "counters")
+            if text is None:
+                continue
+            seen("counters")
+            check("counters")
+            for lineno, line in enumerate(text.splitlines(), 1):
                 for m in pat.finditer(line):
                     # A count inside quotation marks is being discussed, not
                     # asserted — usually an example of somebody else's stale
@@ -371,7 +450,8 @@ def check_manual_counters(root: Path) -> None:
 #    here when the checker caught all of them.
 def check_mutation_receipt() -> None:
     receipt = Path(__file__).resolve().parent / RECEIPT_NAME
-    check("mutation receipt")
+    seen("selftest")
+    check("selftest")
     where = RECEIPT_NAME
     if not receipt.is_file():
         add("SR-SELFTEST-001", "mutation test has never passed here — "
@@ -403,15 +483,61 @@ def rel(p: Path, root: Path) -> str:
 def hook_summary(execute: bool) -> str:
     """Never let a quiet report pass for an end-to-end check. What was only read
     and what was actually run have to be visible in the same line."""
-    c = coverage
-    if not c["found"]:
+    c = coverage["hooks"]
+    if not c["discovered"]:
         return "hooks: none declared"
     tail = (f", {c['unsupported']} unsupported" if c["unsupported"] else "") + \
            (f", {c['outside']} outside the root" if c["outside"] else "")
     if execute:
-        return (f"hooks: {c['found']} declared, {c['executed']} executed{tail}")
-    return (f"hooks: {c['found']} declared, {c['inspected']} inspected statically, "
-            f"0 executed{tail} — static inspection is not proof that they run")
+        return (f"hooks: {c['discovered']} declared, {c['executed']} executed{tail}")
+    return (f"hooks: {c['discovered']} declared, {c['inspected_statically']} "
+            f"inspected statically, 0 executed{tail} — static inspection is not "
+            f"proof that they run")
+
+
+def coverage_lines() -> list[str]:
+    """One line per class, including the classes that found nothing.
+
+    Omitting an empty class would be the same mistake the tool exists to
+    report: a class nobody looked at and a class that came back clean print
+    identically once one of them is left out."""
+    width = max(len(c) for c in CLASSES)
+    out = []
+    for cls, what in CLASSES.items():
+        c = coverage[cls]
+        why = ", ".join(f"{r} {n}" for r, n in sorted(c["skipped_reasons"].items()))
+        out.append(f"  {cls.ljust(width)}  {c['discovered']} discovered, "
+                   f"{c['checked']} checked, {c['skipped']} skipped"
+                   + (f" ({why})" if why else "")
+                   + f" — {what}")
+    return out
+
+
+def as_json(root: Path, started_at: str, execute: bool) -> str:
+    by_rule: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    for f in findings:
+        by_rule[f.rule] = by_rule.get(f.rule, 0) + 1
+        by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
+    doc = {
+        "tool": {"name": "silent-rot", "version": VERSION},
+        "root": str(root),
+        "started_at": started_at,
+        "summary": {
+            "mode": "execute-hooks" if execute else "static",
+            "checks": sum(c["checked"] for c in coverage.values()),
+            "findings": len(findings),
+            "by_severity": dict(sorted(by_severity.items())),
+            "by_rule": dict(sorted(by_rule.items())),
+        },
+        "coverage": coverage,
+        "findings": [
+            {"rule": f.rule, "severity": f.severity, "path": f.path,
+             "line": f.line, "message": f.message}
+            for f in findings
+        ],
+    }
+    return json.dumps(doc, indent=2, sort_keys=False, ensure_ascii=False)
 
 
 def main() -> int:
@@ -424,11 +550,20 @@ def main() -> int:
     ap.add_argument("--trusted-root", metavar="ABS_PATH",
                     help="absolute path that must equal ROOT; your explicit statement "
                          "that you own the code in it")
+    ap.add_argument("--format", choices=("text", "json"), default="text",
+                    help="json emits one object on stdout and nothing else")
     args = ap.parse_args()
 
+    # In json mode stdout carries the document and nothing but the document, so
+    # that a consumer can pipe it straight into a parser. Everything a human
+    # would read goes to stderr.
+    def diag(msg: str) -> None:
+        print(msg, file=sys.stderr if args.format == "json" else sys.stdout)
+
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     root = Path(args.root).resolve()
     if not root.is_dir():
-        print(f"not a directory: {root}")
+        diag(f"not a directory: {root}")
         return 2
 
     execute = args.execute_hooks
@@ -436,12 +571,12 @@ def main() -> int:
         # Two flags that must agree, so that no single forgotten flag, alias or
         # copied command line can turn a scan into an execution.
         if not args.trusted_root:
-            print("--execute-hooks requires --trusted-root ABS_PATH naming the same root")
+            diag("--execute-hooks requires --trusted-root ABS_PATH naming the same root")
             return 2
         if Path(args.trusted_root).resolve() != root:
-            print(f"--trusted-root does not match the scan root:\n"
-                  f"  scan root:    {root}\n"
-                  f"  trusted root: {Path(args.trusted_root).resolve()}")
+            diag(f"--trusted-root does not match the scan root:\n"
+                 f"  scan root:    {root}\n"
+                 f"  trusted root: {Path(args.trusted_root).resolve()}")
             return 2
 
     settings = check_settings_valid(root)
@@ -452,13 +587,20 @@ def main() -> int:
     check_manual_counters(root)
     check_mutation_receipt()
 
-    print(f"checks run: {checks}")
+    if args.format == "json":
+        print(as_json(root, started_at, execute))
+        return 0
+
+    print(f"checks run: {sum(c['checked'] for c in coverage.values())}")
     print(hook_summary(execute))
+    print("coverage:")
+    for line in coverage_lines():
+        print(line)
     if not findings:
         print("no problems found")
         # Worth distrusting: see README, "A clean report is a claim, not proof".
         return 0
-    print(f"findings: {len(findings)}\n")
+    print(f"\nfindings: {len(findings)}\n")
     for f in findings:
         print(f"  {f.render()}")
     return 0

@@ -68,17 +68,22 @@ def build_fixture(root: Path) -> Path:
     return ws
 
 
+def scan(ws: Path, execute: bool = False, fmt: str = "text",
+         checker: Path = CHECKER) -> subprocess.CompletedProcess:
+    argv = [sys.executable, str(checker), str(ws), "--format", fmt]
+    if execute:
+        argv += ["--execute-hooks", "--trusted-root", str(ws)]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120)
+
+
 def run(ws: Path, execute: bool = False) -> set[str]:
     """The finding lines of one scan, verbatim.
 
     Whole lines, not ids: the delta against the baseline has to distinguish two
     findings that share a rule. The id is what the assertion then reads out of
     the delta."""
-    argv = [sys.executable, str(CHECKER), str(ws)]
-    if execute:
-        argv += ["--execute-hooks", "--trusted-root", str(ws)]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-    return {l.strip() for l in r.stdout.splitlines() if l.strip().startswith("[")}
+    out = scan(ws, execute).stdout
+    return {l.strip() for l in out.splitlines() if l.strip().startswith("[")}
 
 
 def rule_ids(lines: set[str]) -> set[str]:
@@ -86,10 +91,7 @@ def rule_ids(lines: set[str]) -> set[str]:
 
 
 def report(ws: Path, execute: bool = False) -> str:
-    argv = [sys.executable, str(CHECKER), str(ws)]
-    if execute:
-        argv += ["--execute-hooks", "--trusted-root", str(ws)]
-    return subprocess.run(argv, capture_output=True, text=True, timeout=120).stdout
+    return scan(ws, execute).stdout
 
 
 LONG_RULE = ("Every hypothesis gets a kill criterion before the test starts, "
@@ -207,8 +209,167 @@ MUTATIONS = [
 ]
 
 
+# --- The machine-readable report --------------------------------------------
+# Not mutations: nothing is broken below. These assert that the two renderings
+# of one scan agree, and that the JSON shape cannot drift without saying so.
+
+GOLDEN = Path(__file__).resolve().parent / "golden" / "report.json"
+COVERAGE_LINE = re.compile(r"^(\w+)\s+(\d+) discovered, (\d+) checked, (\d+) skipped")
+
+
+def build_reportable(root: Path) -> Path:
+    """The fixture plus enough defects that the report has something to say. A
+    golden file over an empty findings list proves the envelope and nothing
+    inside it. The undated row is deliberate: a pending row with no date cannot
+    be aged, and has to be counted as unchecked rather than as fine."""
+    ws = build_fixture(root)
+    (ws / "beta" / "CLAUDE.md").write_text(
+        "# beta\n\nSee `docs/handbook.md`. This workspace holds 15 projects.\n",
+        encoding="utf-8")
+    (ws / "alpha" / "artifacts").mkdir()
+    (ws / "alpha" / "queue.md").write_text(
+        "| Date | Item | Status |\n|---|---|---|\n"
+        f"| {OLD} | thing | unprocessed |\n"
+        "| | undated | pending |\n", encoding="utf-8")
+    return ws
+
+
+def portable_checker(tmp: Path) -> Path:
+    """A copy of the checker, run from a directory of its own.
+
+    The real one reads its mutation receipt from the directory it lives in, and
+    whether that receipt exists is a property of this machine rather than of the
+    fixture — a golden file that depends on it is green or red by accident."""
+    d = tmp / "tool"
+    d.mkdir(exist_ok=True)
+    copy = d / "liveness.py"
+    shutil.copy(CHECKER, copy)
+    return copy
+
+
+def masked(doc: dict, ws: Path, tmp: Path) -> dict:
+    """Everything the fixture cannot control: the clock, the temporary path the
+    fixture was built in, and the version string."""
+    s = json.dumps(doc, ensure_ascii=False)
+    s = s.replace(str(ws), "<ROOT>").replace(str(tmp), "<TMP>")
+    out = json.loads(s)
+    out["started_at"] = "<TIMESTAMP>"
+    out["root"] = "<ROOT>"
+    out["tool"]["version"] = "<VERSION>"
+    return out
+
+
+def acc_json_matches_text(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """One scan, two renderings, one set of numbers. Coverage that disagrees
+    with itself is worse than no coverage: both numbers look authoritative."""
+    text = scan(ws).stdout
+    doc = json.loads(scan(ws, fmt="json").stdout)
+    from_text = {m.group(1): (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+                 for l in text.splitlines()
+                 if (m := COVERAGE_LINE.match(l.strip()))}
+    from_json = {k: (v["discovered"], v["checked"], v["skipped"])
+                 for k, v in doc["coverage"].items()}
+    if not from_text:
+        return False, "the text report printed no coverage lines at all"
+    if from_text != from_json:
+        differ = {k for k in from_json if from_text.get(k) != from_json[k]}
+        return False, f"classes disagree: {sorted(differ)}"
+    in_text = len([l for l in text.splitlines() if l.strip().startswith("[")])
+    if in_text != doc["summary"]["findings"]:
+        return False, f"findings: {in_text} in text, {doc['summary']['findings']} in json"
+    if off := unbalanced(doc["coverage"]):
+        return False, f"discovered != checked + skipped in {off}"
+    return True, f"{len(from_text)} classes, {in_text} findings"
+
+
+def unbalanced(cov: dict) -> list[str]:
+    """Every discovered object was either checked or skipped. Without this,
+    "0 discovered, 1 skipped" is printable, and a reader cannot tell whether the
+    class was thin or the counting was wrong."""
+    return sorted(k for k, v in cov.items()
+                  if v["discovered"] != v["checked"] + v["skipped"])
+
+
+def acc_json_is_alone_on_stdout(ws: Path, tmp: Path) -> tuple[bool, str]:
+    r = scan(ws, fmt="json")
+    try:
+        json.loads(r.stdout)
+    except ValueError as e:
+        return False, f"stdout is not exactly one json object: {e}"
+    # Negative half: a run that fails must not put its complaint where the
+    # parser is reading. Scanning a path that does not exist is the cheapest way
+    # to make the tool talk.
+    bad = scan(ws / "does-not-exist", fmt="json")
+    if bad.stdout.strip():
+        return False, f"a failed json run wrote to stdout: {bad.stdout[:80]!r}"
+    if not bad.stderr.strip():
+        return False, "a failed json run reported nothing on stderr either"
+    return True, "one object on stdout, diagnostics on stderr"
+
+
+def acc_golden(ws: Path, tmp: Path) -> tuple[bool, str]:
+    doc = masked(json.loads(scan(ws, fmt="json",
+                                 checker=portable_checker(tmp)).stdout), ws, tmp)
+    text = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+    if "--update-golden" in sys.argv:
+        GOLDEN.parent.mkdir(exist_ok=True)
+        GOLDEN.write_text(text, encoding="utf-8")
+        return True, f"rewritten: {GOLDEN.name}"
+    if not GOLDEN.is_file():
+        return False, f"no golden file at {GOLDEN} — run with --update-golden"
+    if GOLDEN.read_text(encoding="utf-8") != text:
+        return False, ("the report has changed shape; read the diff, then "
+                       "rerun with --update-golden if the change is intended")
+    return True, "byte-identical once the clock and the temp path are masked"
+
+
+def acc_bad_input_is_a_skip(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """Input the checker cannot read must become a counted skip.
+
+    Both halves crashed the whole scan in 0.1.1: `2026-13-45` matches the shape
+    of a date and is not one, and a file the process cannot open raised out of
+    the middle of the pass. A traceback is not a report."""
+    work = tmp / "badinput"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir()
+    bad = build_fixture(work)
+    (bad / "alpha" / "queue.md").write_text(
+        "| Date | Item | Status |\n|---|---|---|\n"
+        "| 2026-13-45 | thing | unprocessed |\n", encoding="utf-8")
+    locked = bad / "beta" / "CLAUDE.md"
+    locked.chmod(0o000)
+    try:
+        r = scan(bad, fmt="json")
+        if r.returncode != 0:
+            return False, f"the scan died: {r.stderr.strip().splitlines()[-1:]}"
+        cov = json.loads(r.stdout)["coverage"]
+        reasons = {r for c in cov.values() for r in c["skipped_reasons"]}
+        if not any("does not parse" in r for r in reasons):
+            return False, f"the malformed date was not counted as a skip: {reasons}"
+        # The only fixture here whose classes carry skips, so the only place the
+        # counting invariant can actually come apart.
+        if off := unbalanced(cov):
+            return False, f"discovered != checked + skipped in {off}"
+        if not any("unreadable" in r for r in reasons):
+            # Root reads anything; say so rather than pass the half silently.
+            return True, "date skip counted; the unreadable half needs a non-root user"
+        return True, "both counted as skips, exit code 0"
+    finally:
+        locked.chmod(0o644)
+
+
+ACCEPTANCE = [
+    ("json and text report the same numbers", acc_json_matches_text),
+    ("json mode keeps stdout parseable", acc_json_is_alone_on_stdout),
+    ("unreadable input is a skip, not a crash", acc_bad_input_is_a_skip),
+    ("report shape matches the golden file", acc_golden),
+]
+
+
 def main() -> int:
-    failures = []
+    failures = []          # mutations the checker stayed quiet about
+    refused: list[tuple[str, str]] = []   # acceptance checks that did not hold
     proven: set[str] = set()
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp) / "pristine"
@@ -242,6 +403,16 @@ def main() -> int:
             if not caught:
                 failures.append((name, case.get("expect"), sorted(new)))
 
+        work = Path(tmp) / "reportable"
+        work.mkdir()
+        ws = build_reportable(work)
+        print()
+        for name, fn in ACCEPTANCE:
+            ok, detail = fn(ws, Path(tmp))
+            print(f"  {'ok     ' if ok else 'FAILED '} {name} — {detail}")
+            if not ok:
+                refused.append((name, detail))
+
     # A rule nothing here breaks is a rule this suite says nothing about. Naming
     # them is the same discipline the checker applies to the tree it scans: an
     # unchecked class that goes unmentioned reads as a checked one.
@@ -254,6 +425,11 @@ def main() -> int:
         print(f"\nmutations not caught: {len(failures)}/{len(MUTATIONS)}")
         for name, expected, new in failures:
             print(f"\n  {name}\n    expected rule: {expected}\n    new findings: {new or '—'}")
+    if refused:
+        print(f"\nacceptance checks that did not hold: {len(refused)}/{len(ACCEPTANCE)}")
+        for name, detail in refused:
+            print(f"\n  {name}\n    {detail}")
+    if failures or refused:
         return 1
 
     RECEIPT.write_text(json.dumps({
