@@ -46,6 +46,10 @@ Each finding carries a stable rule id:
 [warning] SR-REF-001 Research/CLAUDE.md:62 — declared but missing: inbox/queue.md
 ```
 
+A reference is resolved against the directory of the document that declares it, then against that document's project, and only then against the workspace root — and only when the leading segment names a real top-level project. Spans that describe how names are formed rather than naming a file (`YYYY-MM-DD-slug.md`, `cases/<id>/`, `style-tokens/*.yaml`), and bare filenames mentioned in prose, are counted as skipped rather than checked. On a 17-project workspace those two families produced dozens of findings and every one of them was false — a bare `inbox.md` names the file each *other* project keeps, and `CLAUDE.md` in a sentence about what plugins may ship names a convention. What is still checked is any reference carrying a separator, which is what a claim about structure looks like.
+
+The empty-folder rule reads the same declarations: it fires on a directory a document presents as part of the structure, not on every empty folder it can find.
+
 `warning` is a fact the checker established and you can act on; `info` is a fact whose significance only you can settle — a hand-written count may be right, a parked queue row may be parked on purpose. The id is what stays put: message wording changes between releases, `SR-REF-001` does not, so it is what to grep for, script against, and cite in a bug report.
 
 Every run ends with what was looked at, class by class:

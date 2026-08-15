@@ -63,10 +63,12 @@
       "missing": 0
     },
     "paths": {
-      "discovered": 2,
+      "discovered": 3,
       "checked": 2,
-      "skipped": 0,
-      "skipped_reasons": {}
+      "skipped": 1,
+      "skipped_reasons": {
+        "filename in prose, not a structural reference": 1
+      }
     },
     "folders": {
       "discovered": 1,

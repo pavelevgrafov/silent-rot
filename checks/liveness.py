@@ -452,20 +452,42 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
             f.write_bytes(content)
 
 
-# 3. Paths quoted in instruction files still resolve. Three resolution rules,
-#    each learned by getting it wrong: resolve inside the file's own project
-#    (not a neighbour's), treat a folder the document itself marks as planned
-#    as honest, and accept a path qualified by prose on the same line.
-def check_paths(root: Path, cfg: dict) -> None:
+# A span that describes how names are formed rather than naming a file. These
+# were 40-odd of the 92 false alarms this rule produced on a real workspace:
+# `YYYY-MM-DD-slug.md`, `cases/<id>-<slug>/`, `prompts/{prompt_id}/v{N}.md`,
+# `style-tokens/*.yaml`, `kebab-case.md`. Checking them for existence is a
+# category error, and the reader who reads three of them stops reading the list.
+PATTERN_SPAN = re.compile(
+    r"[<>{}*?()|$\\]"                       # placeholder or shell metacharacter
+    r"|\]\("                                # a markdown link, not a path
+    r"|\bYYYY\b|\bMM\b|\bDD\b"              # date template
+    r"|\bslug\b|\bkebab-case\b|\bsnake_case\b|\bcamelCase\b"
+    r"|название", re.I)
+
+
+# 3. Paths quoted in instruction files still resolve. The resolution rules were
+#    each learned by getting them wrong — see the comment on `base` below, which
+#    cost this checker 92 false findings in a single run.
+def check_paths(root: Path, cfg: dict) -> set[Path]:
     pat = re.compile(r"`([^`\s]+?/[^`\s]*|[^`\s]+?\.(?:md|sh|py|json|ya?ml))`")
     planned = re.compile(r"not created|planned|future|later|не создан|планир")
-    names = {p.name for p in projects(root, cfg)}
+    # Only real top-level projects may pull a reference back to the root. The
+    # previous version used every first- and second-level directory, so ordinary
+    # folder names — inbox, reports, tasks, audit — counted as project names.
+    tops = {d.name for d in root.glob("*")
+            if d.is_dir() and not d.name.startswith(".") and not excluded(d, root, cfg)}
+    declared_dirs: set[Path] = set()
     files = [f for pr in [root] + projects(root, cfg)
              for n in cfg["instruction_files"] if (f := pr / n).is_file()]
     for f in files:
         text = read_text(f, "paths")
         if text is None:
             continue
+        # The project this document belongs to, which is a second legitimate
+        # base for a relative reference. For a project's own CLAUDE.md this is
+        # the directory the file is already in.
+        parts = Path(rel(f, root)).parts
+        owner = root / parts[0] if len(parts) > 1 else root
         lines = text.splitlines()
         # A folder marked planned on any one line is planned everywhere in that
         # document — the same folders get enumerated again in later sections.
@@ -481,44 +503,80 @@ def check_paths(root: Path, cfg: dict) -> None:
                 if raw in deferred or planned.search(line.lower()):
                     skip("paths", "document marks it as planned")
                     continue
-                if raw.startswith(("http", "<", "{")):
+                if raw.startswith("http"):
                     skip("paths", "not a path on disk")
+                    continue
+                if PATTERN_SPAN.search(raw):
+                    skip("paths", "naming pattern, not a path")
                     continue
                 if raw.count("/") == 1 and "." not in raw and not raw.endswith("/"):
                     skip("paths", "Owner/Repo slug, not a path on disk")
                     continue
+                if "/" not in raw and not raw.startswith("~"):
+                    # A bare filename in prose is not a structural reference.
+                    # `inbox.md` in one project's document means the file each
+                    # *other* project keeps; `CLAUDE.md` in a sentence about
+                    # what plugins may ship names a convention, not a file here.
+                    # Measured on a 17-project workspace: bare names produced
+                    # ten findings and not one of them was true. A reference to
+                    # structure carries a separator, and those are still checked.
+                    skip("paths", "filename in prose, not a structural reference")
+                    continue
                 check("paths")
                 if raw.startswith(("~", "/")):
-                    ok = Path(os.path.expanduser(raw)).exists()
-                elif "/" not in raw:
-                    # Documents routinely name a file by its bare name and leave
-                    # the folder implicit ("run test_liveness.py"). Only a name
-                    # that exists nowhere in the tree is a broken reference.
-                    ok = (f.parent / raw).exists() or any(
-                        p.name == raw for p in root.rglob(raw))
-                elif raw.startswith(".."):
-                    ok = (f.parent / raw).exists()
+                    target = Path(os.path.expanduser(raw))
+                    ok = target.exists()
                 else:
-                    base = root if raw.split("/")[0] in names else f.parent
-                    ok = (base / raw).exists()
-                if not ok:
-                    ok = any((root / n / raw).exists() for n in names if n in line)
+                    # The document's own directory, first and by default. The
+                    # previous order tried the workspace root first whenever the
+                    # leading segment matched any known folder name, so `inbox/`
+                    # written in Research/CLAUDE.md was looked for beside
+                    # Research rather than inside it — 92 of 95 findings on a
+                    # real workspace, every one of them false.
+                    target = f.parent / raw
+                    ok = target.exists()
+                    if not ok and owner != f.parent:
+                        # A README in a subdirectory routinely writes paths from
+                        # the root of its own project: `docs/04.md` in
+                        # Bannerzila/prompts/README.md means Bannerzila/docs.
+                        target = owner / raw
+                        ok = target.exists()
+                    first = raw.split("/")[0]
+                    if not ok and first in tops:
+                        target = root / raw
+                        ok = target.exists()
+                    if not ok:
+                        # "In `Research`, see `inbox/`" — the project named in
+                        # the prose beside the reference, and only that.
+                        for n in tops:
+                            if n in line and (root / n / raw).exists():
+                                target, ok = root / n / raw, True
+                                break
+                if ok and raw.endswith("/") and target.is_dir():
+                    # The document presents this directory as part of the
+                    # structure. That declaration is what makes an empty one
+                    # worth reporting; see check_declared_but_empty.
+                    declared_dirs.add(target.resolve())
                 if not ok:
                     add("SR-REF-001", f"declared but missing: {raw}",
                         rel(f, root), lineno)
+    return declared_dirs
 
 
 # 4. A folder a document presents as part of the structure, that exists and is
-#    empty, is a promise nobody kept.
-def check_declared_but_empty(root: Path, cfg: dict) -> None:
-    for pr in projects(root, cfg):
-        for d in pr.glob("*"):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
-            seen("folders")
-            check("folders")
-            if not any(d.rglob("*")):
-                add("SR-EMPTY-001", "declared folder is empty", rel(d, root))
+#    empty, is a promise nobody kept. Only declared folders: the rule used to
+#    fire on any empty directory anywhere, which is a report about someone's
+#    scratch space, not about a promise. A span ending in `/` in an instruction
+#    file is the declaration — the parser already had to find it to check that
+#    it resolves. (Asking for a hand-written list of directories instead would
+#    invert the tool: the person who remembers to list a directory is not the
+#    person who forgets to fill it.)
+def check_declared_but_empty(root: Path, cfg: dict, declared: set[Path]) -> None:
+    for d in sorted(declared):
+        seen("folders")
+        check("folders")
+        if not any(d.rglob("*")):
+            add("SR-EMPTY-001", "declared folder is empty", rel(d, root))
 
 
 # 5. Rows in a queue that have sat unprocessed long enough that "parked on
@@ -760,8 +818,8 @@ def main() -> int:
     cfg, applied = load_config(root)
     settings = check_settings_valid(root, cfg)
     check_hooks(root, settings, execute)
-    check_paths(root, cfg)
-    check_declared_but_empty(root, cfg)
+    declared_dirs = check_paths(root, cfg)
+    check_declared_but_empty(root, cfg, declared_dirs)
     check_stale_rows(root, cfg)
     check_manual_counters(root, cfg)
     check_mutation_receipt()

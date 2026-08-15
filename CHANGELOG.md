@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### The reference rule stopped crying wolf
+
+On a real 17-project workspace this tool produced 95 findings, 92 of them from one rule. It now produces 24, and 20 from that rule — of which 17 are true on inspection. The prediction that "effectively all 92 were false" turned out wrong in a useful way: 62 were false and 30 were real, hidden inside the noise. A rule that wrong is worse than an absent one, because it spends the attention the next real finding needs.
+
+Three causes, all in how a reference was resolved:
+
+- **The base was wrong.** Every first- and second-level directory counted as a project, so ordinary folder names — `inbox`, `reports`, `tasks`, `audit` — were treated as project names and `inbox/` written in `Research/CLAUDE.md` was looked for beside `Research` instead of inside it. A reference now resolves against the document's own directory first, then that document's project root (a nested `README` writing `docs/04.md` means its project's `docs`), and against the workspace root only when the leading segment names a real top-level project.
+- **Patterns were checked as paths.** `YYYY-MM-DD-slug.md`, `cases/<id>-<slug>/`, `prompts/{prompt_id}/v{N}.md`, `style-tokens/*.yaml`, markdown links, and one `2>/dev/null` that this repo's own README contributed.
+- **Bare filenames.** Dropped from the rule, not merely from their workspace-wide fallback. Measured: ten findings on that workspace, none true. A structural claim carries a separator.
+
+The empty-folder rule fired on any empty directory, including scratch space that no document ever promised. It now fires only on a directory some document presents as part of the structure — a code span ending in `/`, which the reference parser already had to find. (A hand-written list of directories in the config was rejected: the person who remembers to list a directory is not the person who forgets to fill it.)
+
+Both narrowings are defended by tests that assert *silence* — ordinary structure, patterns and undeclared empty folders produce nothing — alongside the mutations that still prove a genuinely broken reference and a genuinely empty promise are caught.
+
 ### Four settings, in an optional file
 
 `.silent-rot.toml` in the scan root, absent by default: `instruction_files`, `pending_statuses`, `stale_days`, `exclude_globs`. That is the whole surface. All four were hardcoded, and they are exactly what differs between workspaces — a queue whose rows say `todo` is invisible to a checker looking for `unprocessed`, and the run comes back clean, which is this project's failure mode performed by this project. Every report now prints the vocabulary that was in force, and `--format json` carries the resolved profile in `summary.config`.

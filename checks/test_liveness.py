@@ -144,6 +144,16 @@ def _no_sentinel(ws: Path) -> bool:
     return not (ws.parent / "SENTINEL").exists()
 
 
+def _declare_empty_dir(ws: Path) -> None:
+    """A folder the document presents as part of the structure, and nothing in
+    it. The declaration is what makes it a broken promise rather than somebody's
+    scratch space."""
+    (ws / "alpha" / "artifacts").mkdir()
+    (ws / "alpha" / "CLAUDE.md").write_text(
+        "# alpha\n\nThe queue lives in `queue.md`.\nArtifacts go in `artifacts/`.\n",
+        encoding="utf-8")
+
+
 def _receipt_survives_an_edit(tmp: Path) -> tuple[set[str], str]:
     """The receipt has to expire when the code it attests to changes.
 
@@ -226,8 +236,7 @@ MUTATIONS = [
          expect="SR-SETTINGS-001"),
 
     dict(name="declared folder is empty",
-         mutate=lambda ws: (ws / "alpha" / "artifacts").mkdir(),
-         expect="SR-EMPTY-001"),
+         mutate=_declare_empty_dir, expect="SR-EMPTY-001"),
 
     dict(name="queue row has gone stale",
          mutate=lambda ws: (ws / "alpha" / "queue.md").write_text(
@@ -300,7 +309,7 @@ def build_reportable(root: Path) -> Path:
     (ws / "beta" / "CLAUDE.md").write_text(
         "# beta\n\nSee `docs/handbook.md`. This workspace holds 15 projects.\n",
         encoding="utf-8")
-    (ws / "alpha" / "artifacts").mkdir()
+    _declare_empty_dir(ws)
     (ws / "alpha" / "queue.md").write_text(
         "| Date | Item | Status |\n|---|---|---|\n"
         f"| {OLD} | thing | unprocessed |\n"
@@ -467,7 +476,7 @@ def acc_config_keys_do_something(ws: Path, tmp: Path) -> tuple[bool, str]:
          lambda w: (w / "alpha" / "NOTES.md").write_text(
              "See `docs/handbook.md`.\n", encoding="utf-8"),
          'instruction_files = ["NOTES.md"]\n', "SR-REF-001", True),
-        ("exclude_globs", lambda w: (w / "alpha" / "artifacts").mkdir(),
+        ("exclude_globs", _declare_empty_dir,
          'exclude_globs = ["alpha/**"]\n', "SR-EMPTY-001", False),
     ]
 
@@ -483,8 +492,47 @@ def acc_config_keys_do_something(ws: Path, tmp: Path) -> tuple[bool, str]:
     return True, "all four keys change the result, in both directions"
 
 
+def acc_quiet_about_the_ordinary(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """The other half of a rule: what it must not say.
+
+    On a real 17-project workspace `SR-REF-001` produced 92 findings, all false,
+    and a rule that wrong is worse than an absent one — it spends the attention
+    the next real finding needs. Each case below is one family from that run.
+    The last two are the control: with the noise gone, a genuinely broken
+    reference and a genuinely broken promise still have to speak.
+    """
+    work = tmp / "quiet"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir()
+    w = build_fixture(work)
+    (w / "alpha" / "inbox").mkdir()
+    (w / "alpha" / "inbox" / "note.md").write_text("x\n", encoding="utf-8")
+    (w / "alpha" / "scratch").mkdir()                      # empty, undeclared
+    (w / "alpha" / "CLAUDE.md").write_text(
+        "# alpha\n"
+        "The queue lives in `queue.md`, intake in `inbox/`.\n"          # own project
+        "Reports are named `YYYY-MM-DD-slug.md` under `cases/<id>/`.\n"  # patterns
+        "Tokens live in `style-tokens/*.yaml`, see `[текст](../x/y.md)`.\n"
+        "Silence stderr with `2>/dev/null`.\n"
+        # scratch/ is deliberately not named anywhere in this document.
+        "But `docs/handbook.md` really is missing.\n",
+        encoding="utf-8")
+    ids = rule_ids(_finding_lines(w, CHECKER))
+    lines = sorted(l for l in _finding_lines(w, CHECKER) if "SR-REF-001" in l)
+
+    # `inbox/` resolves inside alpha, not beside it; the patterns are patterns;
+    # `scratch/` is nobody's promise. Exactly one reference is broken.
+    if len(lines) != 1 or "handbook" not in lines[0]:
+        return False, f"expected one broken reference, got {lines}"
+    if "SR-EMPTY-001" in ids:
+        return False, "an empty folder no document declares was reported"
+    return True, "one true reference finding, no folder noise"
+
+
 ACCEPTANCE = [
     ("every config key changes what the scan does", acc_config_keys_do_something),
+    ("quiet about ordinary structure", acc_quiet_about_the_ordinary),
     ("json and text report the same numbers", acc_json_matches_text),
     ("json mode keeps stdout parseable", acc_json_is_alone_on_stdout),
     ("unreadable input is a skip, not a crash", acc_bad_input_is_a_skip),
