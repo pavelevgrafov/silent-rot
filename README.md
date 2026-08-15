@@ -38,7 +38,32 @@ Run the machine-checkable subset against a directory:
 python3 checks/liveness.py /path/to/your/workspace
 ```
 
-It reports declared paths that do not resolve, hooks declared but missing or failing, invalid settings files, declared folders sitting empty, queue rows gone stale, and hand-written counts worth verifying. It is a report, not a gate: the exit code is 0 either way.
+It reports declared paths that do not resolve, hooks declared but missing, hook commands it cannot read statically, invalid settings files, declared folders sitting empty, queue rows gone stale, and hand-written counts worth verifying. It is a report, not a gate: the exit code is 0 either way.
+
+This scan **never runs anything it finds.** Hooks are read, not executed, and the report says so on its own line:
+
+```text
+hooks: 3 declared, 3 inspected statically, 0 executed — static inspection is not proof that they run
+```
+
+Take that sentence literally. A hook that exists and parses can still be dead, and only running it settles the question. In a workspace whose code you own:
+
+```bash
+python3 checks/liveness.py ~/work --execute-hooks --trusted-root ~/work
+```
+
+Both flags are required and must name the same directory, so no single forgotten flag turns a scan into an execution. Hooks then run without a shell, with a minimal environment (no API tokens from your session), with a 25-second timeout, and with their state files restored afterwards — an audit that consumes a nudge's "already reported" flag silences the next real notification.
+
+## The scanned tree is untrusted data
+
+Everything in `ROOT` — settings files, hook commands, documents — is read as data written by someone else, including when that someone is you six months ago.
+
+- No network calls, ever. No telemetry. Nothing is written into the scanned tree.
+- No `shell=True`, in any mode. A command containing a pipe, a redirection, a substitution or a variable is reported as unsupported rather than interpreted; only a plain `argv` (optionally with a `2>/dev/null` or `|| true` tail) is understood.
+- A hook path that resolves outside `ROOT` is never executed, even in trusted mode, and is counted separately in the report.
+- Trusted mode is for a workspace you own. It is not a sandbox and does not claim to be one; a sandbox is a different tool.
+
+**Before v0.1.1 none of this was true:** a plain scan executed any `.sh` or `.py` path named in a settings file, including paths outside the scanned tree, and reported "no problems found" while doing it. If you ran an older revision against a repository you did not write, treat it as having run that repository's code. See [CHANGELOG.md](CHANGELOG.md).
 
 Prove the checker actually speaks before you trust it:
 

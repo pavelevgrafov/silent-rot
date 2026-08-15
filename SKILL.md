@@ -63,7 +63,7 @@ Then a sixth question the first five cannot answer, because all of them measure 
 
 ## The tooling in this repo
 
-`checks/liveness.py` implements the machine-checkable subset: declared paths that do not resolve, hooks declared but missing or failing, invalid settings, empty declared folders, stale queue rows, hand-written counts. Point it at a directory.
+`checks/liveness.py` implements the machine-checkable subset: declared paths that do not resolve, hooks declared but missing or unreadable statically, invalid settings, empty declared folders, stale queue rows, hand-written counts. Point it at a directory. It never executes what it finds; whether a hook still works is settled by `--execute-hooks --trusted-root` on a workspace you own, and the report distinguishes the two.
 
 `checks/test_liveness.py` is the part that matters more. It builds a fixture, breaks one thing at a time, and fails if the checker stays quiet — then writes a dated receipt that the checker reads back and complains about when it goes stale. This is how "N checks, no problems" becomes evidence instead of a claim.
 

@@ -6,15 +6,23 @@ workspace on 2026-08-13, after weeks of the whole thing looking healthy. None
 of them is clever; they are the checks nobody writes because the answer feels
 obvious until you look.
 
+The scanned tree is treated as untrusted data. A plain scan never runs anything
+it finds; hooks are inspected statically and counted as inspected, not proven.
+Proving a hook still works means running it, and that needs two explicit flags
+naming the workspace you own.
+
 Usage:
     python3 liveness.py [ROOT]        # ROOT defaults to the current directory
+    python3 liveness.py ROOT --execute-hooks --trusted-root ROOT
 
 Exit code is 0 whether or not problems are found — this is a report, not a
 gate. Wire it into a hook or a weekly job and read the output.
 """
+import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import date, datetime
@@ -31,8 +39,22 @@ STALE_DAYS = 14
 RECEIPT_NAME = ".mutation-receipt.json"
 RECEIPT_MAX_AGE_DAYS = 30
 
+# A child process gets nothing but what it needs to run. Inheriting the parent
+# environment hands every API token in the shell to somebody else's script.
+SAFE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "NO_COLOR")
+
+# Real hook commands almost always carry a tail that keeps a broken hook from
+# breaking the session. These exact forms change nothing about what executes,
+# so they are removed before parsing. Everything else that looks like shell is
+# refused rather than interpreted — guessing shell semantics is how a checker
+# starts executing what it meant to inspect.
+NOOP_TAIL = re.compile(r"\s*(?:[12]?>\s*/dev/null|\|\|\s*true|;\s*true|;\s*exit\s+0)")
+SHELL_META = re.compile(r"[|&;<>$`*?~\[\]{}()!\\]")
+INTERPRETERS = ("bash", "sh", "python3", "python")
+
 problems: list[str] = []
 checks = 0
+coverage = {"found": 0, "inspected": 0, "executed": 0, "unsupported": 0, "outside": 0}
 
 
 def check(_label: str) -> None:
@@ -67,12 +89,50 @@ def check_settings_valid(root: Path) -> list[Path]:
     return found
 
 
-# 2. Every hook a settings file names exists and exits cleanly. Declaring a
-#    hook is not running it: seven were wired into session startup here and had
-#    never once executed.
-def check_hooks(root: Path, settings: list[Path]) -> None:
+# 2. Every hook a settings file names exists, is statically understandable, and
+#    — only when explicitly asked — actually exits cleanly. Declaring a hook is
+#    not running it: seven were wired into session startup here and had never
+#    once executed. But reading a settings file is not permission to run what it
+#    names: until v0.1.1 this function executed any `.sh`/`.py` path it found in
+#    the scanned tree, including paths outside that tree.
+def classify_command(command: str, base: Path, root: Path) -> tuple[str, list[str], Path | None, str]:
+    """Decide what a hook command is, without a shell and without running it.
+
+    Returns (kind, argv, resolved_path, note) where kind is one of
+    supported | unsupported | missing | outside.
+    """
+    stripped = NOOP_TAIL.sub(" ", command).strip()
+    if not stripped:
+        return "unsupported", [], None, "nothing left after the no-op suffixes"
+    if SHELL_META.search(stripped):
+        return "unsupported", [], None, "shell operator, redirection or expansion"
+    try:
+        argv = shlex.split(stripped)
+    except ValueError as e:
+        return "unsupported", [], None, f"cannot be parsed: {e}"
+    if not argv:
+        return "unsupported", [], None, "empty command"
+
+    if argv[0] in INTERPRETERS:
+        if len(argv) < 2:
+            return "unsupported", [], None, f"interpreter without a script: {argv[0]}"
+        target, rest, prefix = argv[1], argv[2:], [argv[0]]
+    else:
+        target, rest, prefix = argv[0], argv[1:], []
+
+    resolved = (base / target).resolve() if not os.path.isabs(target) else Path(target).resolve()
+    if not resolved.is_file():
+        return "missing", [], resolved, "declared, not on disk"
+    if root not in resolved.parents:
+        # Outside the scanned tree the file may exist and be perfectly healthy;
+        # what cannot be claimed is that this scan checked it.
+        return "outside", [], resolved, "lives outside the scanned root"
+    return "supported", prefix + [str(resolved)] + rest, resolved, ""
+
+
+def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
     before = {f: f.read_bytes() for d in root.glob("**/.claude")
-              for f in d.glob(STATE_GLOB) if f.is_file()}
+              for f in d.glob(STATE_GLOB) if f.is_file()} if execute else {}
     seen: set[str] = set()
     for p in settings:
         try:
@@ -82,27 +142,52 @@ def check_hooks(root: Path, settings: list[Path]) -> None:
         for event, groups in (data.get("hooks") or {}).items():
             for group in groups:
                 for hook in group.get("hooks", []):
-                    m = re.search(r'"?([^"\s]+\.(?:sh|py))"?', hook.get("command", ""))
-                    if not m or m.group(1) in seen:
+                    command = hook.get("command", "")
+                    if not command.strip() or command in seen:
                         continue
-                    path = m.group(1)
-                    seen.add(path)
+                    seen.add(command)
                     check("hook")
-                    if not Path(path).exists():
-                        problems.append(f"hook does not exist: {path} (event {event})")
+                    coverage["found"] += 1
+                    kind, argv, resolved, note = classify_command(
+                        command, p.parent, root)
+
+                    if kind == "missing":
+                        problems.append(
+                            f"hook does not exist: {resolved} (event {event}, "
+                            f"declared in {rel(p, root)})")
                         continue
+                    if kind == "unsupported":
+                        coverage["unsupported"] += 1
+                        problems.append(
+                            f"hook command not statically supported, not executed "
+                            f"({note}): {command.strip()[:100]} (event {event})")
+                        continue
+                    if kind == "outside":
+                        coverage["outside"] += 1
+                        if execute:
+                            problems.append(
+                                f"hook outside the trusted root, not executed: "
+                                f"{resolved} (event {event})")
+                        continue
+
+                    coverage["inspected"] += 1
+                    if not execute:
+                        continue
+                    coverage["executed"] += 1
                     try:
-                        runner = "python3" if path.endswith(".py") else "bash"
                         # Hooks are fed JSON on stdin; with no stdin a reader
                         # blocks forever and the check misreports it as a hang.
-                        r = subprocess.run([runner, path], input="{}",
-                                           capture_output=True, text=True, timeout=25)
+                        r = subprocess.run(
+                            argv, input="{}", capture_output=True, text=True,
+                            timeout=25, cwd=str(p.parent), shell=False,
+                            env={k: os.environ[k] for k in SAFE_ENV_KEYS
+                                 if k in os.environ})
                         if r.returncode != 0:
                             problems.append(
-                                f"hook fails (code {r.returncode}): {path} — "
+                                f"hook fails (code {r.returncode}): {resolved} — "
                                 f"{(r.stderr or '').strip()[:120]}")
                     except subprocess.TimeoutExpired:
-                        problems.append(f"hook hangs (>25s): {path}")
+                        problems.append(f"hook hangs (>25s): {resolved}")
 
     # Running a hook that reports only on change makes it record what it just
     # reported, so the audit itself silences the next real notification. Put
@@ -251,13 +336,52 @@ def rel(p: Path, root: Path) -> str:
         return str(p)
 
 
+def hook_summary(execute: bool) -> str:
+    """Never let a quiet report pass for an end-to-end check. What was only read
+    and what was actually run have to be visible in the same line."""
+    c = coverage
+    if not c["found"]:
+        return "hooks: none declared"
+    tail = (f", {c['unsupported']} unsupported" if c["unsupported"] else "") + \
+           (f", {c['outside']} outside the root" if c["outside"] else "")
+    if execute:
+        return (f"hooks: {c['found']} declared, {c['executed']} executed{tail}")
+    return (f"hooks: {c['found']} declared, {c['inspected']} inspected statically, "
+            f"0 executed{tail} — static inspection is not proof that they run")
+
+
 def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    ap = argparse.ArgumentParser(
+        description="Report mechanisms that look alive and are not. "
+                    "The scanned tree is treated as untrusted data.")
+    ap.add_argument("root", nargs="?", default=".", help="directory to scan")
+    ap.add_argument("--execute-hooks", action="store_true",
+                    help="run the hooks declared inside ROOT; requires --trusted-root")
+    ap.add_argument("--trusted-root", metavar="ABS_PATH",
+                    help="absolute path that must equal ROOT; your explicit statement "
+                         "that you own the code in it")
+    args = ap.parse_args()
+
+    root = Path(args.root).resolve()
     if not root.is_dir():
         print(f"not a directory: {root}")
         return 2
+
+    execute = args.execute_hooks
+    if execute:
+        # Two flags that must agree, so that no single forgotten flag, alias or
+        # copied command line can turn a scan into an execution.
+        if not args.trusted_root:
+            print("--execute-hooks requires --trusted-root ABS_PATH naming the same root")
+            return 2
+        if Path(args.trusted_root).resolve() != root:
+            print(f"--trusted-root does not match the scan root:\n"
+                  f"  scan root:    {root}\n"
+                  f"  trusted root: {Path(args.trusted_root).resolve()}")
+            return 2
+
     settings = check_settings_valid(root)
-    check_hooks(root, settings)
+    check_hooks(root, settings, execute)
     check_paths(root)
     check_declared_but_empty(root)
     check_stale_rows(root)
@@ -265,6 +389,7 @@ def main() -> int:
     check_mutation_receipt()
 
     print(f"checks run: {checks}")
+    print(hook_summary(execute))
     if not problems:
         print("no problems found")
         # Worth distrusting: see README, "A clean report is a claim, not proof".
