@@ -40,6 +40,14 @@ python3 checks/liveness.py /path/to/your/workspace
 
 It reports declared paths that do not resolve, hooks declared but missing, hook commands it cannot read statically, invalid settings files, declared folders sitting empty, queue rows gone stale, and hand-written counts worth verifying. It is a report, not a gate: the exit code is 0 either way.
 
+Each finding carries a stable rule id:
+
+```text
+[warning] SR-REF-001 Research/CLAUDE.md:62 — declared but missing: inbox/queue.md
+```
+
+`warning` is a fact the checker established and you can act on; `info` is a fact whose significance only you can settle — a hand-written count may be right, a parked queue row may be parked on purpose. The id is what stays put: message wording changes between releases, `SR-REF-001` does not, so it is what to grep for, script against, and cite in a bug report.
+
 This scan **never runs anything it finds.** Hooks are read, not executed, and the report says so on its own line:
 
 ```text

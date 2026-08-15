@@ -14,6 +14,7 @@ zero, so a new check landing in liveness.py does not break the harness.
 Run:  python3 test_liveness.py     (exit 0 = every mutation was caught)
 """
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,14 @@ from pathlib import Path
 
 CHECKER = Path(__file__).resolve().parent / "liveness.py"
 RECEIPT = Path(__file__).resolve().parent / ".mutation-receipt.json"
+
+# The rule table is read from the checker itself, so a rule that exists in the
+# code but is proved by nothing here shows up as a stated gap rather than as
+# silence. Importing runs no scan: liveness.py does its work under __main__.
+sys.path.insert(0, str(CHECKER.parent))
+from liveness import RULES  # noqa: E402
+
+RULE_ID = re.compile(r"\bSR-[A-Z]+-\d{3}\b")
 
 
 def build_fixture(root: Path) -> Path:
@@ -60,12 +69,20 @@ def build_fixture(root: Path) -> Path:
 
 
 def run(ws: Path, execute: bool = False) -> set[str]:
+    """The finding lines of one scan, verbatim.
+
+    Whole lines, not ids: the delta against the baseline has to distinguish two
+    findings that share a rule. The id is what the assertion then reads out of
+    the delta."""
     argv = [sys.executable, str(CHECKER), str(ws)]
     if execute:
         argv += ["--execute-hooks", "--trusted-root", str(ws)]
     r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-    return {l.strip().lstrip("— ").strip()
-            for l in r.stdout.splitlines() if l.strip().startswith("—")}
+    return {l.strip() for l in r.stdout.splitlines() if l.strip().startswith("[")}
+
+
+def rule_ids(lines: set[str]) -> set[str]:
+    return {m.group(0) for l in lines for m in [RULE_ID.search(l)] if m}
 
 
 def report(ws: Path, execute: bool = False) -> str:
@@ -125,42 +142,47 @@ def _no_sentinel(ws: Path) -> bool:
 
 
 # Each case: what is broken, how, and what proves the checker noticed. `mode`
-# picks the plain scan or the explicit trusted run; `check` replaces the
-# substring assertion when the evidence is a side effect rather than a line.
+# picks the plain scan or the explicit trusted run; `check` carries the
+# assertion when the evidence is a side effect rather than a finding.
+#
+# `expect` is a rule id, never a phrase from the message. It used to be a
+# substring — "declared but missing", "BROKEN JSON" — which made every one of
+# these tests a test of the wording. Rewrite a sentence and the mutation stops
+# being caught, with nothing on screen to say a rule went unproven.
 MUTATIONS = [
     dict(name="declared path does not exist",
          mutate=lambda ws: (ws / "beta" / "CLAUDE.md").write_text(
              "# beta\n\nSee `docs/handbook.md`.\n", encoding="utf-8"),
-         expect="declared but missing"),
+         expect="SR-REF-001"),
 
     dict(name="hook declared, file absent",
          mutate=lambda ws: (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").unlink(),
-         expect="hook does not exist"),
+         expect="SR-HOOK-001"),
 
     dict(name="hook exits non-zero",
          mutate=lambda ws: (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").write_text(
              "#!/bin/bash\nexit 3\n", encoding="utf-8"),
-         expect="hook fails", mode="execute"),
+         expect="SR-HOOK-004", mode="execute"),
 
     dict(name="settings file is not valid JSON",
          mutate=lambda ws: (ws / "alpha" / ".claude" / "settings.json").write_text(
              "{ broken", encoding="utf-8"),
-         expect="BROKEN JSON"),
+         expect="SR-SETTINGS-001"),
 
     dict(name="declared folder is empty",
          mutate=lambda ws: (ws / "alpha" / "artifacts").mkdir(),
-         expect="declared folder is empty"),
+         expect="SR-EMPTY-001"),
 
     dict(name="queue row has gone stale",
          mutate=lambda ws: (ws / "alpha" / "queue.md").write_text(
              f"| Date | Item | Status |\n|---|---|---|\n| {OLD} | thing | unprocessed |\n",
              encoding="utf-8"),
-         expect="unprocessed for"),
+         expect="SR-QUEUE-001"),
 
     dict(name="hand-written count in an instruction file",
          mutate=lambda ws: (ws / "beta" / "CLAUDE.md").write_text(
              "# beta\n\nThis workspace holds 15 projects.\n", encoding="utf-8"),
-         expect="hand-written count"),
+         expect="SR-COUNT-001"),
 
     dict(name="stateful hook is not consumed by the audit",
          mutate=_stateful, expect=None, mode="execute",
@@ -177,16 +199,17 @@ MUTATIONS = [
          check=lambda ws: "0 executed" in report(ws)),
 
     dict(name="shell operator in a hook command is refused, not interpreted",
-         mutate=_shell_operator, expect="not statically supported"),
+         mutate=_shell_operator, expect="SR-HOOK-002"),
 
     dict(name="hook outside the scanned root is not executed",
-         mutate=_outside_root, expect="outside the trusted root", mode="execute",
+         mutate=_outside_root, expect="SR-HOOK-003", mode="execute",
          check=_no_sentinel),
 ]
 
 
 def main() -> int:
     failures = []
+    proven: set[str] = set()
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp) / "pristine"
         base.mkdir()
@@ -210,7 +233,8 @@ def main() -> int:
 
             caught = True
             if case.get("expect"):
-                caught = any(case["expect"] in p for p in new)
+                caught = case["expect"] in rule_ids(new)
+                proven.add(case["expect"])
             if caught and case.get("check"):
                 caught = case["check"](ws)
 
@@ -218,10 +242,18 @@ def main() -> int:
             if not caught:
                 failures.append((name, case.get("expect"), sorted(new)))
 
+    # A rule nothing here breaks is a rule this suite says nothing about. Naming
+    # them is the same discipline the checker applies to the tree it scans: an
+    # unchecked class that goes unmentioned reads as a checked one.
+    unproven = sorted(set(RULES) - proven)
+    print(f"\nrules with a mutation: {len(proven)}/{len(RULES)}")
+    if unproven:
+        print(f"rules proved by nothing here: {', '.join(unproven)}")
+
     if failures:
         print(f"\nmutations not caught: {len(failures)}/{len(MUTATIONS)}")
         for name, expected, new in failures:
-            print(f"\n  {name}\n    expected substring: {expected}\n    new problems: {new or '—'}")
+            print(f"\n  {name}\n    expected rule: {expected}\n    new findings: {new or '—'}")
         return 1
 
     RECEIPT.write_text(json.dumps({
