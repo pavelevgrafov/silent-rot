@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Four settings, in an optional file
+
+`.silent-rot.toml` in the scan root, absent by default: `instruction_files`, `pending_statuses`, `stale_days`, `exclude_globs`. That is the whole surface. All four were hardcoded, and they are exactly what differs between workspaces — a queue whose rows say `todo` is invisible to a checker looking for `unprocessed`, and the run comes back clean, which is this project's failure mode performed by this project. Every report now prints the vocabulary that was in force, and `--format json` carries the resolved profile in `summary.config`.
+
+A key that does nothing is a finding (`SR-CONFIG-002`), not a silent drop: a misspelled `pendingstatuses`, a string where a list belongs, an empty list that would switch a check off, an entry pointing outside the scan root. A config file that does not parse is `SR-CONFIG-001` and the scan continues on defaults rather than dying.
+
+Config is data, never permission. The file is read out of the tree being scanned, so it is written by whoever wrote that tree; there is no key that enables hook execution, and a mutation asserts that a config declaring `execute_hooks = true` beside a hostile hook changes nothing except adding a finding about the unknown key.
+
+The default exclusions are `**/.git/**`, `**/node_modules/**`, `**/.venv/**` rather than the unanchored form: a nested `node_modules` was already skipped before this change, and anchoring the patterns at the root would have quietly narrowed what gets skipped while looking like a faithful port.
+
+The user's config deliberately stays out of the receipt digest. It is input to a scan, not part of the tool: folding it in would turn the receipt red for everyone who configures anything, which teaches people to ignore it. What a run used is reported instead, every time.
+
 ### The receipt expires when the code changes, not when the month does
 
 The mutation receipt recorded a date, a count and a pass count. Edit the checker afterwards and it still read as fresh — an attestation to a Tuesday rather than to a version. That is the fourth class in this repo's own list: apparatus that keeps signalling health after the thing it watched moved.

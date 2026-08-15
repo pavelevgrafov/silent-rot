@@ -7,6 +7,29 @@
   "started_at": "<TIMESTAMP>",
   "summary": {
     "mode": "static",
+    "config": {
+      "source": "defaults",
+      "applied": [],
+      "profile": {
+        "instruction_files": [
+          "CLAUDE.md",
+          "AGENTS.md",
+          "README.md"
+        ],
+        "pending_statuses": [
+          "unprocessed",
+          "pending",
+          "не обработано",
+          "не разобрано"
+        ],
+        "stale_days": 14,
+        "exclude_globs": [
+          "**/.git/**",
+          "**/node_modules/**",
+          "**/.venv/**"
+        ]
+      }
+    },
     "checks": 9,
     "findings": 5,
     "by_severity": {

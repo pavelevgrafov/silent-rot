@@ -29,7 +29,8 @@ RECEIPT = Path(__file__).resolve().parent / ".mutation-receipt.json"
 # code but is proved by nothing here shows up as a stated gap rather than as
 # silence. Importing runs no scan: liveness.py does its work under __main__.
 sys.path.insert(0, str(CHECKER.parent))
-from liveness import RECEIPT_NAME, RULES, SELF_FILES, self_hash  # noqa: E402
+from liveness import (CONFIG_NAME, RECEIPT_NAME, RULES,  # noqa: E402
+                      SELF_FILES, self_hash)
 
 RULE_ID = re.compile(r"\bSR-[A-Z]+-\d{3}\b")
 
@@ -184,6 +185,18 @@ def _finding_lines(ws: Path, checker: Path) -> set[str]:
     return {l.strip() for l in out.splitlines() if l.strip().startswith("[")}
 
 
+def _config(ws: Path, body: str) -> None:
+    (ws / CONFIG_NAME).write_text(body, encoding="utf-8")
+
+
+def _config_grants_execution(ws: Path) -> None:
+    """The config file lives inside the tree being scanned, so it is written by
+    whoever wrote that tree. It may narrow a scan; it may never widen what the
+    scan is allowed to do."""
+    _hostile(ws)
+    _config(ws, "execute_hooks = true\ntrusted = true\n")
+
+
 # Each case: what is broken, how, and what proves the checker noticed. `mode`
 # picks the plain scan or the explicit trusted run; `check` carries the
 # assertion when the evidence is a side effect rather than a finding.
@@ -251,6 +264,22 @@ MUTATIONS = [
     # Breaks the checker rather than the fixture, so it runs its own copy.
     dict(name="receipt no longer matches the code it attests to",
          custom=_receipt_survives_an_edit, expect="SR-SELFTEST-005"),
+
+    dict(name="config file does not parse",
+         mutate=lambda ws: _config(ws, "stale_days = \n"),
+         expect="SR-CONFIG-001"),
+
+    dict(name="config key that does nothing is reported, not dropped",
+         mutate=lambda ws: _config(ws, 'pendingstatuses = ["todo"]\n'),
+         expect="SR-CONFIG-002"),
+
+    dict(name="config cannot grant the scan permission to execute",
+         mutate=_config_grants_execution, expect="SR-CONFIG-002",
+         check=_no_sentinel),
+
+    dict(name="config path pointing out of the root is refused",
+         mutate=lambda ws: _config(ws, 'instruction_files = ["../../etc/hosts"]\n'),
+         expect="SR-CONFIG-002"),
 ]
 
 
@@ -404,7 +433,58 @@ def acc_bad_input_is_a_skip(ws: Path, tmp: Path) -> tuple[bool, str]:
         locked.chmod(0o644)
 
 
+def acc_config_keys_do_something(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """Each of the four keys has to change what the scan does.
+
+    The first of these is the case the whole key exists for: a queue whose rows
+    say `todo` is invisible to a checker looking for `unprocessed`, and the run
+    comes back clean. Both directions are asserted — a key that is read but
+    ignored, and a key that fires whatever the config says, look identical from
+    one run.
+    """
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    def fixture(name: str, arrange) -> Path:
+        work = tmp / f"cfg-{name}"
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir()
+        w = build_fixture(work)
+        arrange(w)
+        return w
+
+    def queue(ws: Path, status: str, when: str) -> None:
+        (ws / "alpha" / "queue.md").write_text(
+            f"| Date | Item | Status |\n|---|---|---|\n| {when} | thing | {status} |\n",
+            encoding="utf-8")
+
+    cases = [
+        ("pending_statuses", lambda w: queue(w, "todo", OLD),
+         'pending_statuses = ["todo"]\n', "SR-QUEUE-001", True),
+        ("stale_days", lambda w: queue(w, "unprocessed", recent),
+         "stale_days = 30\n", "SR-QUEUE-001", False),
+        ("instruction_files",
+         lambda w: (w / "alpha" / "NOTES.md").write_text(
+             "See `docs/handbook.md`.\n", encoding="utf-8"),
+         'instruction_files = ["NOTES.md"]\n', "SR-REF-001", True),
+        ("exclude_globs", lambda w: (w / "alpha" / "artifacts").mkdir(),
+         'exclude_globs = ["alpha/**"]\n', "SR-EMPTY-001", False),
+    ]
+
+    for key, arrange, body, rule, appears in cases:
+        w = fixture(key, arrange)
+        before = rule in rule_ids(_finding_lines(w, CHECKER))
+        _config(w, body)
+        after = rule in rule_ids(_finding_lines(w, CHECKER))
+        if (before, after) != (not appears, appears):
+            return False, (f"{key}: {rule} was {'there' if before else 'absent'} "
+                           f"on defaults and {'there' if after else 'absent'} "
+                           f"with the config — the key changed nothing")
+    return True, "all four keys change the result, in both directions"
+
+
 ACCEPTANCE = [
+    ("every config key changes what the scan does", acc_config_keys_do_something),
     ("json and text report the same numbers", acc_json_matches_text),
     ("json mode keeps stdout parseable", acc_json_is_alone_on_stdout),
     ("unreadable input is a skip, not a crash", acc_bad_input_is_a_skip),
