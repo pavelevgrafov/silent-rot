@@ -95,7 +95,15 @@ Prove the checker actually speaks before you trust it:
 python3 checks/test_liveness.py
 ```
 
-This builds a fixture workspace, breaks one thing at a time, and fails if the checker stays quiet about any of them. On success it writes a dated receipt — which `liveness.py` reads back and complains about when it goes stale.
+This builds a fixture workspace, breaks one thing at a time, and fails if the checker stays quiet about any of them. On success it writes a local receipt, which `liveness.py` reads back on every scan.
+
+The receipt is bound to a `sha256` of the checker and its suite, not just to a date. Change one byte in either and the next scan says so:
+
+```text
+[warning] SR-SELFTEST-005 .mutation-receipt.json — the mutation test last passed against different code (rerun test_liveness.py)
+```
+
+A receipt that recorded only a date would attest to a Tuesday: edit the checker afterwards and it still looks fresh, while nothing has proved the code now running can speak at all.
 
 To run the full five-pass audit (the parts a script cannot judge), point an agent at [`SKILL.md`](SKILL.md). With Claude Code, copy it into your skills directory — for a default install that is ~/.claude/skills/silent-rot/SKILL.md — and invoke the skill by name.
 

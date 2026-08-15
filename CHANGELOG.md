@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### The receipt expires when the code changes, not when the month does
+
+The mutation receipt recorded a date, a count and a pass count. Edit the checker afterwards and it still read as fresh — an attestation to a Tuesday rather than to a version. That is the fourth class in this repo's own list: apparatus that keeps signalling health after the thing it watched moved.
+
+It now carries a `sha256` over `liveness.py` and `test_liveness.py`, sorted and named. One changed byte in either and the next scan reports `SR-SELFTEST-005`, distinguishing a receipt from other code from a receipt written before this check existed. When configuration moves out of the source file, the resolved profile has to join the digest — a suite that passed under one status vocabulary proves nothing about a scan run under another.
+
+Proved by a mutation of its own, and this one had to break the checker rather than the fixture: it runs a copy of the checker from a directory of its own, gives it a valid receipt, and edits one byte. The run *before* the edit is half the case — a checker that complained about its receipt unconditionally would pass the after-check while proving nothing.
+
 ### Coverage per class, and a report a machine can read
 
 `--format json` writes one object on stdout and nothing else; diagnostics go to stderr, so a failed run cannot land in the middle of a parser's input. The document carries `tool`, `root`, `started_at`, `summary`, `coverage` and `findings`.
