@@ -29,7 +29,7 @@ RECEIPT = Path(__file__).resolve().parent / ".mutation-receipt.json"
 # code but is proved by nothing here shows up as a stated gap rather than as
 # silence. Importing runs no scan: liveness.py does its work under __main__.
 sys.path.insert(0, str(CHECKER.parent))
-from liveness import RULES  # noqa: E402
+from liveness import RECEIPT_NAME, RULES, SELF_FILES, self_hash  # noqa: E402
 
 RULE_ID = re.compile(r"\bSR-[A-Z]+-\d{3}\b")
 
@@ -143,6 +143,47 @@ def _no_sentinel(ws: Path) -> bool:
     return not (ws.parent / "SENTINEL").exists()
 
 
+def _receipt_survives_an_edit(tmp: Path) -> tuple[set[str], str]:
+    """The receipt has to expire when the code it attests to changes.
+
+    Mutating the workspace cannot test this: the receipt belongs to the checker,
+    not to the tree being scanned. So the checker is copied somewhere it has no
+    receipt, given a valid one, and then edited by a single byte.
+
+    The run *before* the edit is half the test. A checker that complained about
+    its receipt unconditionally would pass the after-check while proving
+    nothing — the failure mode this repo keeps meeting.
+    """
+    tool = tmp / "receipt-tool"
+    if tool.exists():
+        shutil.rmtree(tool)
+    tool.mkdir()
+    for name in SELF_FILES:
+        shutil.copy(CHECKER.parent / name, tool / name)
+    work = tmp / "receipt-ws"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir()
+    ws = build_fixture(work)
+    checker = tool / "liveness.py"
+
+    (tool / RECEIPT_NAME).write_text(json.dumps({
+        "date": date.today().isoformat(), "mutations": 1, "passed": 1,
+        "code_sha256": self_hash(tool)}), encoding="utf-8")
+    before = {i for i in rule_ids(_finding_lines(ws, checker)) if "SELFTEST" in i}
+    if before:
+        return set(), f"the receipt was rejected before the edit: {sorted(before)}"
+
+    checker.write_bytes(checker.read_bytes() + b"\n")   # one byte
+    after = rule_ids(_finding_lines(ws, checker))
+    return after, f"quiet with a matching receipt, {sorted(after)} after one byte"
+
+
+def _finding_lines(ws: Path, checker: Path) -> set[str]:
+    out = scan(ws, checker=checker).stdout
+    return {l.strip() for l in out.splitlines() if l.strip().startswith("[")}
+
+
 # Each case: what is broken, how, and what proves the checker noticed. `mode`
 # picks the plain scan or the explicit trusted run; `check` carries the
 # assertion when the evidence is a side effect rather than a finding.
@@ -206,6 +247,10 @@ MUTATIONS = [
     dict(name="hook outside the scanned root is not executed",
          mutate=_outside_root, expect="SR-HOOK-003", mode="execute",
          check=_no_sentinel),
+
+    # Breaks the checker rather than the fixture, so it runs its own copy.
+    dict(name="receipt no longer matches the code it attests to",
+         custom=_receipt_survives_an_edit, expect="SR-SELFTEST-005"),
 ]
 
 
@@ -384,6 +429,16 @@ def main() -> int:
 
         for case in MUTATIONS:
             name, mode = case["name"], case.get("mode", "static")
+            if case.get("custom"):
+                # A case that breaks the checker instead of the workspace, and
+                # therefore arranges its own run.
+                ids, detail = case["custom"](Path(tmp))
+                proven.add(case["expect"])
+                caught = case["expect"] in ids
+                print(f"  {'caught ' if caught else 'MISSED '} {name} — {detail}")
+                if not caught:
+                    failures.append((name, case["expect"], sorted(ids)))
+                continue
             work = Path(tmp) / "case"
             if work.exists():
                 shutil.rmtree(work)
@@ -436,6 +491,9 @@ def main() -> int:
         "date": date.today().isoformat(),
         "mutations": len(MUTATIONS),
         "passed": len(MUTATIONS),
+        # What the run actually attests to. Without it the receipt says the
+        # suite passed on a day, not that it passed on this code.
+        "code_sha256": self_hash(),
     }), encoding="utf-8")
     print(f"\nall {len(MUTATIONS)} mutations caught; receipt written")
     return 0

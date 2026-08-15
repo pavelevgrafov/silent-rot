@@ -15,7 +15,7 @@ Settled as of v0.1.1. A change that weakens one of these is wrong even when the 
 
 ## Adding a rule
 
-In one change: the rule id in `RULES`, the check itself, a mutation that asserts that id, and a line in `README.md` if a user would otherwise not know the rule exists. Run `python3 checks/test_liveness.py` — it writes a local receipt on success, which `liveness.py` reads back and complains about when it goes stale. The receipt is never committed: a receipt from someone else's machine would tell you the checks work when you have not run them.
+In one change: the rule id in `RULES`, the check itself, a mutation that asserts that id, and a line in `README.md` if a user would otherwise not know the rule exists. Run `python3 checks/test_liveness.py` — it writes a local receipt on success, which `liveness.py` reads back and complains about when it goes stale. The receipt is bound to a hash of both files, so any edit invalidates it: expect `SR-SELFTEST-005` until you rerun the suite, and read that as the intended behaviour rather than as noise. The receipt is never committed: a receipt from someone else's machine would tell you the checks work when you have not run them.
 
 A new rule usually changes the report shape, so the golden file goes red. Read that diff — it is the review of your own change — then regenerate it with `python3 checks/test_liveness.py --update-golden` and commit `checks/golden/report.json` alongside the rule. Never regenerate a red golden without reading the diff first; that turns the tripwire into a rubber stamp.
 

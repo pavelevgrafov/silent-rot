@@ -19,6 +19,7 @@ Exit code is 0 whether or not problems are found — this is a report, not a
 gate. Wire it into a hook or a weekly job and read the output.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -79,7 +80,33 @@ RULES = {
     "SR-SELFTEST-002": "warning",   # receipt unreadable
     "SR-SELFTEST-003": "warning",   # mutation test passed only in part
     "SR-SELFTEST-004": "warning",   # receipt older than the threshold
+    "SR-SELFTEST-005": "warning",   # receipt attests to different code
 }
+
+# The files a passing mutation run actually attests to. Sorted and named, so
+# that swapping two files or renaming one changes the digest.
+SELF_FILES = ("liveness.py", "test_liveness.py")
+
+
+def self_hash(base: Path | None = None) -> str:
+    """A fingerprint of the code the mutation suite ran against.
+
+    A receipt that records only a date attests to a Tuesday. Edit the checker
+    afterwards and the receipt still looks fresh, which is this project's own
+    failure mode: apparatus that keeps signalling health after the thing it
+    watched has changed underneath it.
+
+    When configuration moves out of this file, the resolved profile has to join
+    this digest — a suite that passed under one status vocabulary proves nothing
+    about a scan run under another.
+    """
+    base = base or Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for name in sorted(SELF_FILES):
+        f = base / name
+        h.update(name.encode())
+        h.update(f.read_bytes() if f.is_file() else b"<missing>")
+    return h.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -466,6 +493,14 @@ def check_mutation_receipt() -> None:
     if data.get("passed") != data.get("mutations"):
         add("SR-SELFTEST-003",
             f"mutation test incomplete: {data.get('passed')}/{data.get('mutations')}",
+            where)
+    elif data.get("code_sha256") != self_hash():
+        # Checked before the age: a receipt for code that no longer exists is
+        # not made better by being recent.
+        why = ("the receipt predates this check" if not data.get("code_sha256")
+               else "rerun test_liveness.py")
+        add("SR-SELFTEST-005",
+            f"the mutation test last passed against different code ({why})",
             where)
     elif (date.today() - when).days > RECEIPT_MAX_AGE_DAYS:
         add("SR-SELFTEST-004",
