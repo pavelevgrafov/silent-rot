@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Findings have stable ids, and the self-test asserts them
+
+Every finding now renders as `[severity] SR-AREA-NNN path:line — message`. The id is the part that does not move; the message is prose and will be rewritten.
+
+This started as a defect in the test harness rather than in the checker. Each mutation asserted a substring of the message it expected — `"declared but missing"`, `"BROKEN JSON"` — so the suite was testing the wording. Rewrite a sentence and the mutation stops being caught, the run stays green, and nothing on screen says a rule went unproven. Mutations now assert the rule id.
+
+The harness also prints which rules no mutation breaks (`SR-HOOK-005` and the four `SR-SELFTEST-*` at the time of writing). Same rule as the hooks line: an unchecked class that goes unmentioned reads as a checked one.
+
+Severity belongs to the rule, not to the call site: `warning` for a fact the checker established, `info` for a fact whose significance only a reader can settle. Neither is a verdict.
+
 ## 0.1.1 — 2026-08-15
 
 ### Security — the scanner executed code from the tree it was scanning

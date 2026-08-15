@@ -25,6 +25,7 @@ import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
@@ -52,9 +53,56 @@ NOOP_TAIL = re.compile(r"\s*(?:[12]?>\s*/dev/null|\|\|\s*true|;\s*true|;\s*exit\
 SHELL_META = re.compile(r"[|&;<>$`*?~\[\]{}()!\\]")
 INTERPRETERS = ("bash", "sh", "python3", "python")
 
-problems: list[str] = []
+# Every rule this checker can emit, with the severity that belongs to the rule
+# rather than to the call site. The id is the stable name — what a test asserts,
+# what a reader greps for, what a future suppression list would name. The
+# message beside it is prose and may be rewritten at any time.
+#
+# `warning` is a fact the checker established and a reader can act on;
+# `info` is a fact whose significance only a human can settle. Neither is a
+# verdict: the tool cannot know that a stale row was forgotten rather than
+# parked on purpose.
+RULES = {
+    "SR-SETTINGS-001": "warning",   # settings file does not parse
+    "SR-HOOK-001": "warning",       # hook declared, file not on disk
+    "SR-HOOK-002": "info",          # hook command not statically understandable
+    "SR-HOOK-003": "info",          # hook resolves outside the scanned root
+    "SR-HOOK-004": "warning",       # executed hook exits non-zero
+    "SR-HOOK-005": "warning",       # executed hook hangs
+    "SR-REF-001": "warning",        # path declared in a document does not resolve
+    "SR-EMPTY-001": "info",         # declared folder exists and is empty
+    "SR-QUEUE-001": "info",         # queue rows unprocessed past the threshold
+    "SR-COUNT-001": "info",         # hand-written count worth verifying
+    "SR-SELFTEST-001": "warning",   # mutation test has never passed here
+    "SR-SELFTEST-002": "warning",   # receipt unreadable
+    "SR-SELFTEST-003": "warning",   # mutation test passed only in part
+    "SR-SELFTEST-004": "warning",   # receipt older than the threshold
+}
+
+
+@dataclass(frozen=True)
+class Finding:
+    rule: str
+    severity: str
+    message: str
+    path: str = ""
+    line: int | None = None
+
+    def render(self) -> str:
+        loc = f"{self.path}:{self.line}" if self.line else self.path
+        where = f" {loc}" if loc else ""
+        return f"[{self.severity}] {self.rule}{where} — {self.message}"
+
+
+findings: list[Finding] = []
 checks = 0
 coverage = {"found": 0, "inspected": 0, "executed": 0, "unsupported": 0, "outside": 0}
+
+
+def add(rule: str, message: str, path: str = "", line: int | None = None) -> None:
+    # KeyError on an unregistered id, deliberately: a rule that emits an id
+    # nothing declares is a rule no test can assert and no reader can look up.
+    findings.append(Finding(rule, RULES[rule], message, path, line))
 
 
 def check(_label: str) -> None:
@@ -85,7 +133,8 @@ def check_settings_valid(root: Path) -> list[Path]:
         try:
             json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:
-            problems.append(f"BROKEN JSON: {rel(p, root)} — {e}")
+            add("SR-SETTINGS-001", f"settings file is not valid JSON: {e}",
+                rel(p, root), getattr(e, "lineno", None))
     return found
 
 
@@ -152,22 +201,24 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                         command, p.parent, root)
 
                     if kind == "missing":
-                        problems.append(
-                            f"hook does not exist: {resolved} (event {event}, "
-                            f"declared in {rel(p, root)})")
+                        add("SR-HOOK-001",
+                            f"hook does not exist: {resolved} (event {event})",
+                            rel(p, root))
                         continue
                     if kind == "unsupported":
                         coverage["unsupported"] += 1
-                        problems.append(
+                        add("SR-HOOK-002",
                             f"hook command not statically supported, not executed "
-                            f"({note}): {command.strip()[:100]} (event {event})")
+                            f"({note}): {command.strip()[:100]} (event {event})",
+                            rel(p, root))
                         continue
                     if kind == "outside":
                         coverage["outside"] += 1
                         if execute:
-                            problems.append(
+                            add("SR-HOOK-003",
                                 f"hook outside the trusted root, not executed: "
-                                f"{resolved} (event {event})")
+                                f"{resolved} (event {event})",
+                                rel(p, root))
                         continue
 
                     coverage["inspected"] += 1
@@ -183,11 +234,12 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                             env={k: os.environ[k] for k in SAFE_ENV_KEYS
                                  if k in os.environ})
                         if r.returncode != 0:
-                            problems.append(
-                                f"hook fails (code {r.returncode}): {resolved} — "
-                                f"{(r.stderr or '').strip()[:120]}")
+                            add("SR-HOOK-004",
+                                f"hook fails (code {r.returncode}): "
+                                f"{(r.stderr or '').strip()[:120]}",
+                                rel(resolved, root))
                     except subprocess.TimeoutExpired:
-                        problems.append(f"hook hangs (>25s): {resolved}")
+                        add("SR-HOOK-005", "hook hangs (>25s)", rel(resolved, root))
 
     # Running a hook that reports only on change makes it record what it just
     # reported, so the audit itself silences the next real notification. Put
@@ -213,7 +265,7 @@ def check_paths(root: Path) -> None:
         # document — the same folders get enumerated again in later sections.
         skip = {raw for l in lines if planned.search(l.lower()) for raw in pat.findall(l)}
         seen: set[str] = set()
-        for line in lines:
+        for lineno, line in enumerate(lines, 1):
             if planned.search(line.lower()):
                 continue
             for raw in sorted(set(pat.findall(line)) - skip):
@@ -239,7 +291,8 @@ def check_paths(root: Path) -> None:
                 if not ok:
                     ok = any((root / n / raw).exists() for n in names if n in line)
                 if not ok:
-                    problems.append(f"declared but missing: {raw} (in {rel(f, root)})")
+                    add("SR-REF-001", f"declared but missing: {raw}",
+                        rel(f, root), lineno)
 
 
 # 4. A folder a document presents as part of the structure, that exists and is
@@ -251,7 +304,7 @@ def check_declared_but_empty(root: Path) -> None:
                 continue
             check("folder not empty")
             if not any(d.rglob("*")):
-                problems.append(f"declared folder is empty: {rel(d, root)}")
+                add("SR-EMPTY-001", "declared folder is empty", rel(d, root))
 
 
 # 5. Rows in a queue that have sat unprocessed long enough that "parked on
@@ -263,22 +316,27 @@ def check_stale_rows(root: Path) -> None:
         if "node_modules" in f.parts or ".git" in f.parts:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
-        rows = [l for l in text.splitlines() if l.startswith("|") and pending.search(l)]
+        rows = [(n, l) for n, l in enumerate(text.splitlines(), 1)
+                if l.startswith("|") and pending.search(l)]
         if not rows:
             continue
         check("stale rows")
         stale = []
-        for l in rows:
+        for n, l in rows:
             m = datep.search(l)
             if not m:
                 continue
             age = (date.today() - date.fromisoformat(m.group(1))).days
             if age >= STALE_DAYS:
-                stale.append(age)
+                stale.append((age, n))
         if stale:
-            problems.append(
-                f"{rel(f, root)}: {len(stale)} row(s) unprocessed for {STALE_DAYS}+ days "
-                f"(oldest {max(stale)})")
+            oldest, oldest_line = max(stale)
+            # The line of the oldest row, not of the first: the reader opening
+            # the file wants the row that has been waiting longest.
+            add("SR-QUEUE-001",
+                f"{len(stale)} row(s) unprocessed for {STALE_DAYS}+ days "
+                f"(oldest {oldest})",
+                rel(f, root), oldest_line)
 
 
 # 6. A number written into a document that the reader could count. Reported as
@@ -294,7 +352,8 @@ def check_manual_counters(root: Path) -> None:
             if not f.is_file():
                 continue
             check("manual counter")
-            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            for lineno, line in enumerate(
+                    f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 for m in pat.finditer(line):
                     # A count inside quotation marks is being discussed, not
                     # asserted — usually an example of somebody else's stale
@@ -302,8 +361,9 @@ def check_manual_counters(root: Path) -> None:
                     before, after = line[:m.start()], line[m.end():]
                     if any(q in before for q in '"«“') and any(q in after for q in '"»”'):
                         continue
-                    problems.append(
-                        f"hand-written count to verify: \"{m.group(0)}\" in {rel(f, root)}")
+                    add("SR-COUNT-001",
+                        f"hand-written count to verify: \"{m.group(0)}\"",
+                        rel(f, root), lineno)
 
 
 # 7. This checker's own claim to work. "N checks, no problems" proves nothing
@@ -312,21 +372,25 @@ def check_manual_counters(root: Path) -> None:
 def check_mutation_receipt() -> None:
     receipt = Path(__file__).resolve().parent / RECEIPT_NAME
     check("mutation receipt")
+    where = RECEIPT_NAME
     if not receipt.is_file():
-        problems.append(f"mutation test has never passed: no {RECEIPT_NAME} — "
-                        "run test_liveness.py")
+        add("SR-SELFTEST-001", "mutation test has never passed here — "
+            "run test_liveness.py", where)
         return
     try:
         data = json.loads(receipt.read_text(encoding="utf-8"))
         when = datetime.strptime(data["date"], "%Y-%m-%d").date()
     except Exception as e:
-        problems.append(f"mutation receipt unreadable: {e}")
+        add("SR-SELFTEST-002", f"mutation receipt unreadable: {e}", where)
         return
     if data.get("passed") != data.get("mutations"):
-        problems.append(f"mutation test incomplete: {data.get('passed')}/{data.get('mutations')}")
+        add("SR-SELFTEST-003",
+            f"mutation test incomplete: {data.get('passed')}/{data.get('mutations')}",
+            where)
     elif (date.today() - when).days > RECEIPT_MAX_AGE_DAYS:
-        problems.append(f"mutation test last passed {(date.today() - when).days} days ago "
-                        f"(threshold {RECEIPT_MAX_AGE_DAYS})")
+        add("SR-SELFTEST-004",
+            f"mutation test last passed {(date.today() - when).days} days ago "
+            f"(threshold {RECEIPT_MAX_AGE_DAYS})", where)
 
 
 def rel(p: Path, root: Path) -> str:
@@ -390,13 +454,13 @@ def main() -> int:
 
     print(f"checks run: {checks}")
     print(hook_summary(execute))
-    if not problems:
+    if not findings:
         print("no problems found")
         # Worth distrusting: see README, "A clean report is a claim, not proof".
         return 0
-    print(f"problems: {len(problems)}\n")
-    for p in problems:
-        print(f"  — {p}")
+    print(f"findings: {len(findings)}\n")
+    for f in findings:
+        print(f"  {f.render()}")
     return 0
 
 
