@@ -164,6 +164,34 @@ Events that earn an off-schedule sweep: a project renamed or moved, a new mechan
 
 Measure one thing above all — **time from a defect existing to it being found**. In the source audit that was 5 to 30 days. If your next sweep finds three-day-old defects, the tooling works. If it finds thirty-day-old ones again, it does not, however many checks it runs.
 
+## How wrong is it?
+
+Pointed at six public repositories nobody here wrote, on 2026-08-16, for the first time:
+
+| | findings | true on inspection |
+|---|---|---|
+| first contact | 44 | **2** |
+| after fixing what that exposed | 3 | 2 |
+
+**Read the first row as the honest one.** The second is measured on the same six repositories that produced the fixes, so it is fitted by construction — an upper bound, not a precision estimate. The sample is six repositories and one afternoon.
+
+Seven defects in the checker came out of that run, including hook paths resolved beside the settings file instead of the project root (three healthy hooks reported missing), `~/…` paths answered from the *auditor's* home directory rather than the scanned tree, and a script installed by a `for f in hooks/*.py` loop reported as wired to nothing.
+
+The uncomfortable half: precision improved partly by **checking less**. Across those six repositories the scan now examines 21 of 131 declared references — four of the six are dotfiles or template repositories whose documents describe a layout they install *somewhere else*, and there is no static way to tell that from a broken link. The coverage line says so on every run rather than letting a quiet report imply a clean one:
+
+```text
+paths  69 discovered, 9 checked, 60 skipped (this tree installs itself elsewhere 51, …)
+```
+
+To recompute the number yourself, on your own sample:
+
+```bash
+git clone --depth 1 https://github.com/OWNER/REPO /tmp/field/REPO
+python3 checks/liveness.py /tmp/field/REPO --format json | jq '.summary, .coverage.paths'
+```
+
+Then classify every finding by hand, true or false, with the reason. A rate nobody can recompute is a hand-written count, which is the thing `SR-COUNT-001` exists to flag.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

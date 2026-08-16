@@ -266,6 +266,14 @@ def _script_wired_to_a_hook(ws: Path) -> None:
             {"type": "command", "command": f'"{hook}"'}]}]}}), encoding="utf-8")
 
 
+def _script_wired_by_a_glob(ws: Path) -> None:
+    """Wired, but by a loop over the directory rather than by name."""
+    _script_called_automatic(ws)
+    (ws / "alpha" / "setup.sh").write_text(
+        '#!/bin/bash\nfor f in scripts/*.sh; do ln -s "$f" ./bin/; done\n',
+        encoding="utf-8")
+
+
 def _config(ws: Path, body: str) -> None:
     (ws / CONFIG_NAME).write_text(body, encoding="utf-8")
 
@@ -643,6 +651,96 @@ def acc_quiet_about_the_ordinary(ws: Path, tmp: Path) -> tuple[bool, str]:
     return True, "one true reference finding, no folder noise"
 
 
+def acc_quiet_about_the_field_cases(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """Four things the checker said on six repositories it had never seen, all
+    wrong, all fixed here. Each case is the shape that produced the finding.
+
+    They are asserted as silence rather than as mutations because the defect was
+    speech: the tool reported healthy structure. A mutation cannot express
+    "should have said nothing"."""
+    def arrange_project_relative_hook(w: Path) -> None:
+        # `.claude/hooks/x.sh` is written from the project root, which is where
+        # the agent runs it. Resolved beside the settings file it becomes
+        # `.claude/.claude/hooks/x.sh`, and three healthy hooks were "missing".
+        (w / "alpha" / ".claude" / "settings.json").write_text(json.dumps({
+            "hooks": {"SessionStart": [{"hooks": [
+                {"type": "command", "command": ".claude/hooks/nudge.sh"}]}]}}),
+            encoding="utf-8")
+
+    def arrange_path_program(w: Path) -> None:
+        (w / "alpha" / ".claude" / "settings.json").write_text(json.dumps({
+            "hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": "echo done"}]}]}}), encoding="utf-8")
+
+    def arrange_home_path(w: Path) -> None:
+        (w / "alpha" / "CLAUDE.md").write_text(
+            "# alpha\n\nInstall it into `~/.claude/hooks/` when you set up.\n",
+            encoding="utf-8")
+
+    def arrange_root_relative(w: Path) -> None:
+        (w / "alpha" / "docs").mkdir()
+        (w / "shared").mkdir()
+        (w / "shared" / "note.md").write_text("x\n", encoding="utf-8")
+        (w / "alpha" / "docs" / "README.md").write_text(
+            "See `shared/note.md` at the top of the tree.\n", encoding="utf-8")
+
+    cases = [
+        ("a hook path written from the project root", arrange_project_relative_hook,
+         "SR-HOOK-001"),
+        ("a program on PATH as a hook command", arrange_path_program, "SR-HOOK-001"),
+        ("a path in the user's home, not in the tree", arrange_home_path, "SR-REF-001"),
+        ("a root-relative path from a nested document", arrange_root_relative,
+         "SR-REF-001"),
+    ]
+    for label, arrange, rule in cases:
+        work = tmp / f"field-{abs(hash(label))}"
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir()
+        w = build_fixture(work)
+        arrange(w)
+        if rule in rule_ids(_finding_lines(w, CHECKER)):
+            return False, f"{label}: still reported as {rule}"
+        # Each of these shapes reaches a skip that is decided after the check
+        # has already been counted. The first version of one of them counted
+        # the same span twice, and the numbers were only caught by reading
+        # them: 16 discovered, 5 checked, 16 skipped.
+        cov = json.loads(scan(w, fmt="json").stdout)["coverage"]
+        if off := unbalanced(cov):
+            return False, f"{label}: discovered != checked + skipped in {off}"
+    return True, f"{len(cases)} shapes from the field test, quiet and counted once"
+
+
+def acc_installer_repo(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """A tree that installs itself elsewhere describes a layout it creates.
+
+    Four of the six repositories in the first field test were this shape —
+    dotfiles, a template kit, a starter — and every reference the checker
+    reported in them was a true statement about the wrong tree. Both directions
+    are asserted: without the installer the same document is still checked, or
+    the fix would be a way of never reporting anything.
+    """
+    for label, installer in (("without an installer", False), ("with one", True)):
+        work = tmp / f"inst-{int(installer)}"
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir()
+        w = build_fixture(work)
+        (w / "alpha" / "docs").mkdir()
+        (w / "alpha" / "docs" / "README.md").write_text(
+            "Rules live in `.claude/rules/`.\n", encoding="utf-8")
+        if installer:
+            (w / "install.sh").write_text(
+                '#!/bin/bash\ncp -r hooks "$HOME/.claude/hooks"\n', encoding="utf-8")
+        found = "SR-REF-001" in rule_ids(_finding_lines(w, CHECKER))
+        if found is installer:
+            return False, (f"{label}: the reference was "
+                           f"{'reported' if found else 'not reported'}")
+        if off := unbalanced(json.loads(scan(w, fmt="json").stdout)["coverage"]):
+            return False, f"{label}: discovered != checked + skipped in {off}"
+    return True, "checked without an installer, counted as a skip with one"
+
+
 def acc_quiet_about_wired_things(ws: Path, tmp: Path) -> tuple[bool, str]:
     """A healthy workflow, and a script that really is called, must produce
     nothing. `SR-WIRE-*` is `info` on a subject where the tool is guessing at
@@ -662,6 +760,9 @@ def acc_quiet_about_wired_things(ws: Path, tmp: Path) -> tuple[bool, str]:
             w, "name: lib\non:\n  workflow_call:\njobs:\n  a:\n"
                "    runs-on: ubuntu-latest\n")),
         ("a script a hook really calls", _script_wired_to_a_hook),
+        # An installer that loops over the directory never writes the script's
+        # name. Two live hooks in the field test were called dead this way.
+        ("a script installed by a wildcard", _script_wired_by_a_glob),
     ]
     for label, arrange in cases:
         work = tmp / f"wired-{abs(hash(label))}"
@@ -680,6 +781,8 @@ def acc_quiet_about_wired_things(ws: Path, tmp: Path) -> tuple[bool, str]:
 ACCEPTANCE = [
     ("every config key changes what the scan does", acc_config_keys_do_something),
     ("quiet about automation that is wired", acc_quiet_about_wired_things),
+    ("quiet about what the field test proved wrong", acc_quiet_about_the_field_cases),
+    ("a tree that installs itself elsewhere", acc_installer_repo),
     ("quiet about ordinary structure", acc_quiet_about_the_ordinary),
     ("json and text report the same numbers", acc_json_matches_text),
     ("json mode keeps stdout parseable", acc_json_is_alone_on_stdout),

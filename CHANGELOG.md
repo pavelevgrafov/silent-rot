@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Six repositories nobody here wrote
+
+The tool had only ever been measured at home, on a workspace written by the same person it was built for. Pointed at six public repositories for the first time, it produced **44 findings, two of them true** — and seven defects in itself.
+
+The largest was an assumption nobody had noticed making: **that a document describes the tree it sits in.** Four of the six were dotfiles repositories, template kits or starters, whose READMEs describe the layout they install *somewhere else*. Every reference reported in them was a true statement about the wrong tree. A tree with an installer that writes outside itself now has unresolved references counted as skips rather than reported.
+
+The rest, each now with a test asserting silence and a control asserting the rule still speaks without the shape that triggered it:
+
+- hook commands resolved against the settings file's directory instead of the project root, so `.claude/hooks/x.sh` became `.claude/.claude/hooks/x.sh` and three healthy hooks were reported missing — execution used the same wrong `cwd`;
+- a program on `PATH` as a hook command (`afplay sound.aiff`) resolved as a script path and reported missing; now counted as external and never executed, like a hook outside the root;
+- `~/…` and absolute paths answered from the *auditor's* home directory rather than the scanned tree;
+- a root-relative reference from a nested document (`.git/`, `.github/…`) never tried at the scan root; the root is now the last fallback, never the first;
+- a script installed by `for f in hooks/*.py` reported as wired to nothing, because the rule searched for its name.
+
+The seventh was found by reading the coverage numbers rather than by a test: the outside-the-tree skip counted the same span twice, so `discovered = checked + skipped` quietly stopped holding — 16 discovered, 5 checked, 16 skipped. The invariant is now asserted on every shaped fixture.
+
+After the fixes the same six produce three findings, two of them true. That number is fitted to the sample that produced the fixes, and the README says so. It also says the uncomfortable half: precision improved partly by checking less — 21 of 131 declared references across those repositories, none at all on three of them.
+
 ### The rule this project is actually about
 
 The case study leads with a class the checker had no rule for: the check exists, it is documented, and nothing ever calls it. One validator in that audit was described as blocking; it had never run, and the first time it was triggered by hand it found five real violations that had sat for months.
