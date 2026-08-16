@@ -166,18 +166,20 @@ Measure one thing above all — **time from a defect existing to it being found*
 
 ## How wrong is it?
 
-Pointed at six public repositories nobody here wrote, on 2026-08-16, for the first time:
+Pointed at 16 public repositories nobody here wrote, on 2026-08-16, in two rounds. The second ten were never used to derive any fix, so they measure the tool rather than the tuning:
 
-| | findings | true on inspection |
-|---|---|---|
-| first contact | 44 | **2** |
-| after fixing what that exposed | 3 | 2 |
+| sample | at first contact | true | after the fixes it exposed | true |
+|---|---|---|---|---|
+| six repositories | 44 | 2 | 3 | 2 |
+| ten more, unseen | 73 | 6 | 18 | 6 |
 
-**Read the first row as the honest one.** The second is measured on the same six repositories that produced the fixes, so it is fitted by construction — an upper bound, not a precision estimate. The sample is six repositories and one afternoon.
+**First contact is the honest column: about one finding in fourteen was true.** Both "after" columns are fitted to the sample that produced the fixes and are upper bounds, not estimates. What the second round shows is that the first round's fixes did *not* generalise much on their own — the same 5–8% turned up again on repositories the tool had never seen.
 
-Seven defects in the checker came out of that run, including hook paths resolved beside the settings file instead of the project root (three healthy hooks reported missing), `~/…` paths answered from the *auditor's* home directory rather than the scanned tree, and a script installed by a `for f in hooks/*.py` loop reported as wired to nothing.
+One number is worth more than the precision: **all 8 true findings survived every fix.** Each narrowing was checked against that, or a rule that reports nothing would score perfectly.
 
-The uncomfortable half: precision improved partly by **checking less**. Across those six repositories the scan now examines 21 of 131 declared references — four of the six are dotfiles or template repositories whose documents describe a layout they install *somewhere else*, and there is no static way to tell that from a broken link. The coverage line says so on every run rather than letting a quiet report imply a clean one:
+Eleven defects in the checker came out of these two runs, including hook paths resolved beside the settings file instead of the project root (three healthy hooks reported missing), `~/…` paths answered from the *auditor's* home directory, a hook command naming a CLI the repository expects installed (`entire hooks …`) reported as a missing file because it was absent from *this* machine's PATH, and one README that produced 47 separate findings for the counts in its own section table.
+
+The uncomfortable half: precision improved partly by **checking less**. Across the first six repositories the scan now examines 21 of 131 declared references — four of the six are dotfiles or template repositories whose documents describe a layout they install *somewhere else*, and there is no static way to tell that from a broken link. The coverage line says so on every run rather than letting a quiet report imply a clean one:
 
 ```text
 paths  69 discovered, 9 checked, 60 skipped (this tree installs itself elsewhere 51, …)
@@ -191,6 +193,12 @@ python3 checks/liveness.py /tmp/field/REPO --format json | jq '.summary, .covera
 ```
 
 Then classify every finding by hand, true or false, with the reason. A rate nobody can recompute is a hand-written count, which is the thing `SR-COUNT-001` exists to flag.
+
+Three classes of false positive are known and unfixed, so you can recognise them rather than trust them:
+
+- **paths that exist only after something runs** — a build output directory named in an npm script, a log file a hook writes, a directory a skill creates on first use;
+- **references to your repository, not to theirs** — when a tool's README names the rules file it reads, it means the one in the project you point it at, not one of its own;
+- **counts nobody can settle statically** — `SR-COUNT-001` is a request to verify, and a correct number answers it with "fine".
 
 ## License
 

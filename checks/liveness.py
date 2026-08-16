@@ -392,11 +392,17 @@ def classify_command(command: str, base: Path, root: Path) -> tuple[str, list[st
         target, rest, prefix = argv[1], argv[2:], [argv[0]]
     else:
         target, rest, prefix = argv[0], argv[1:], []
-        if "/" not in target and shutil.which(target):
-            # A program on PATH, not a script in the tree: `afplay a-sound.aiff`
-            # as a Stop hook. Resolving it against the settings directory
-            # reported a healthy hook as missing — found on a real repository.
-            return "external", [], Path(shutil.which(target)), "a program on PATH"
+        if "/" not in target and not target.endswith((".sh", ".py")):
+            # A bare program name, not a script in the tree: `afplay sound.aiff`
+            # as a Stop hook, or `entire hooks claude-code session-start` in a
+            # repository that expects its own CLI installed. Whether it is on
+            # *this* machine's PATH says nothing about the repository, so it is
+            # counted and never called missing — the same mistake as answering
+            # a `~/…` path from the auditor's home directory.
+            found = shutil.which(target)
+            return ("external", [], Path(found) if found else None,
+                    "a program on PATH" if found
+                    else "a program, not on this machine's PATH")
 
     resolved = (base / target).resolve() if not os.path.isabs(target) else Path(target).resolve()
     if not resolved.is_file():
@@ -509,6 +515,7 @@ PATTERN_SPAN = re.compile(
     r"|\]\("                                # a markdown link, not a path
     r"|\bYYYY\b|\bMM\b|\bDD\b"              # date template
     r"|\bslug\b|\bkebab-case\b|\bsnake_case\b|\bcamelCase\b"
+    r"|@|path/to"                           # `@path/to/file.md`, a stand-in
     r"|название", re.I)
 
 
@@ -928,6 +935,7 @@ def check_manual_counters(root: Path, cfg: dict) -> None:
                 continue
             seen("counters")
             check("counters")
+            hits: list[tuple[int, str]] = []
             for lineno, line in enumerate(text.splitlines(), 1):
                 for m in pat.finditer(line):
                     # A count inside quotation marks is being discussed, not
@@ -936,9 +944,22 @@ def check_manual_counters(root: Path, cfg: dict) -> None:
                     before, after = line[:m.start()], line[m.end():]
                     if any(q in before for q in '"«“') and any(q in after for q in '"»”'):
                         continue
-                    add("SR-COUNT-001",
-                        f"hand-written count to verify: \"{m.group(0)}\"",
-                        rel(f, root), lineno)
+                    if before.rstrip().endswith(("×", "x", "-", "/")):
+                        # `1080×1920 file` is a video frame, not a count of
+                        # files, and `2-3 projects` is a range.
+                        continue
+                    hits.append((lineno, m.group(0)))
+            if not hits:
+                continue
+            # One finding per document, not per number. A README listing a
+            # category count per section produced 47 separate findings from one
+            # file in the field test — the same information, delivered as a
+            # wall that nobody reads to the end of.
+            shown = ", ".join(f'"{t}"' for _, t in hits[:3])
+            more = f", and {len(hits) - 3} more" if len(hits) > 3 else ""
+            add("SR-COUNT-001",
+                f"{len(hits)} hand-written count(s) to verify: {shown}{more}",
+                rel(f, root), hits[0][0])
 
 
 # 7. This checker's own claim to work. "N checks, no problems" proves nothing

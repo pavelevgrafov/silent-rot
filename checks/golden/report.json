@@ -137,7 +137,7 @@
       "severity": "info",
       "path": "beta/CLAUDE.md",
       "line": 3,
-      "message": "hand-written count to verify: \"15 projects\""
+      "message": "1 hand-written count(s) to verify: \"15 projects\""
     },
     {
       "rule": "SR-SELFTEST-001",
