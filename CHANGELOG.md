@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### The five rules nothing proved
+
+0.2.0 shipped printing its own gap: five of seventeen rules had no mutation, four of them receipt states and one a hook that hangs. A rule with nothing making it speak is not implemented, however carefully it is written — so the suite said so on every run, and this closes it. 22 mutations, 17 of 17 rules.
+
+The receipt cases all run a copy of the checker in a directory of its own. Against the real one the answer would depend on who last ran the suite on this machine rather than on the case. The staleness case needs an otherwise valid digest, or the mismatch rule answers first and the case proves the wrong thing.
+
+The hang case rewrites the 25-second threshold to one second in its copy and gives the hook three seconds to sleep — same branch, same code path, a wait a test suite can afford. The substitution is asserted: without that check, renaming the constant would turn this into a test of a checker that never times out, and it would pass quietly.
+
 ## 0.2.0 — 2026-08-16
 
 ### The reference rule stopped crying wolf
