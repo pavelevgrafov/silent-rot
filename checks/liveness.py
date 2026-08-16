@@ -51,6 +51,9 @@ CONFIG_NAME = ".silent-rot.toml"
 STATE_GLOB = "*last*"          # files hooks use to remember what they reported
 RECEIPT_NAME = ".mutation-receipt.json"
 RECEIPT_MAX_AGE_DAYS = 30
+# Named rather than inline so the mutation that proves a hang is reported can
+# run a copy of this file with a threshold a test suite can afford to wait for.
+HOOK_TIMEOUT = 25
 
 # A child process gets nothing but what it needs to run. Inheriting the parent
 # environment hands every API token in the shell to somebody else's script.
@@ -433,7 +436,7 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                         # blocks forever and the check misreports it as a hang.
                         r = subprocess.run(
                             argv, input="{}", capture_output=True, text=True,
-                            timeout=25, cwd=str(p.parent), shell=False,
+                            timeout=HOOK_TIMEOUT, cwd=str(p.parent), shell=False,
                             env={k: os.environ[k] for k in SAFE_ENV_KEYS
                                  if k in os.environ})
                         if r.returncode != 0:
@@ -442,7 +445,8 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                                 f"{(r.stderr or '').strip()[:120]}",
                                 rel(resolved, root))
                     except subprocess.TimeoutExpired:
-                        add("SR-HOOK-005", "hook hangs (>25s)", rel(resolved, root))
+                        add("SR-HOOK-005", f"hook hangs (>{HOOK_TIMEOUT}s)",
+                            rel(resolved, root))
 
     # Running a hook that reports only on change makes it record what it just
     # reported, so the audit itself silences the next real notification. Put

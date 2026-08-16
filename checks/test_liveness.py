@@ -154,33 +154,54 @@ def _declare_empty_dir(ws: Path) -> None:
         encoding="utf-8")
 
 
+def _portable(tmp: Path, name: str) -> tuple[Path, Path]:
+    """A copy of the checker in a directory of its own, beside a fresh fixture.
+
+    Everything about the receipt has to be tested this way. The receipt belongs
+    to the checker, not to the tree being scanned, so mutating the workspace
+    cannot reach it — and against the real checker the answer would depend on
+    who last ran the suite on this machine rather than on the case."""
+    tool, work = tmp / f"tool-{name}", tmp / f"ws-{name}"
+    for d in (tool, work):
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir()
+    for f in SELF_FILES:
+        shutil.copy(CHECKER.parent / f, tool / f)
+    return tool / "liveness.py", build_fixture(work)
+
+
+def _receipt_case(name: str, receipt):
+    """One mutation per receipt state the checker claims to recognise.
+
+    `receipt` is a dict, raw text, or None for no receipt at all. The string
+    "<self>" stands for the digest of the copy — a case about staleness needs
+    an otherwise valid receipt, or the mismatch rule answers first and the case
+    proves the wrong thing."""
+    def case(tmp: Path) -> tuple[set[str], str]:
+        checker, ws = _portable(tmp, name)
+        if receipt is not None:
+            body = receipt
+            if isinstance(body, dict):
+                body = json.dumps({k: (self_hash(checker.parent)
+                                       if v == "<self>" else v)
+                                   for k, v in body.items()})
+            (checker.parent / RECEIPT_NAME).write_text(body, encoding="utf-8")
+        ids = rule_ids(_finding_lines(ws, checker))
+        return ids, ", ".join(sorted(i for i in ids if "SELFTEST" in i)) or "quiet"
+    return case
+
+
 def _receipt_survives_an_edit(tmp: Path) -> tuple[set[str], str]:
     """The receipt has to expire when the code it attests to changes.
 
-    Mutating the workspace cannot test this: the receipt belongs to the checker,
-    not to the tree being scanned. So the checker is copied somewhere it has no
-    receipt, given a valid one, and then edited by a single byte.
-
     The run *before* the edit is half the test. A checker that complained about
     its receipt unconditionally would pass the after-check while proving
-    nothing — the failure mode this repo keeps meeting.
-    """
-    tool = tmp / "receipt-tool"
-    if tool.exists():
-        shutil.rmtree(tool)
-    tool.mkdir()
-    for name in SELF_FILES:
-        shutil.copy(CHECKER.parent / name, tool / name)
-    work = tmp / "receipt-ws"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir()
-    ws = build_fixture(work)
-    checker = tool / "liveness.py"
-
-    (tool / RECEIPT_NAME).write_text(json.dumps({
+    nothing — the failure mode this repo keeps meeting."""
+    checker, ws = _portable(tmp, "edit")
+    (checker.parent / RECEIPT_NAME).write_text(json.dumps({
         "date": date.today().isoformat(), "mutations": 1, "passed": 1,
-        "code_sha256": self_hash(tool)}), encoding="utf-8")
+        "code_sha256": self_hash(checker.parent)}), encoding="utf-8")
     before = {i for i in rule_ids(_finding_lines(ws, checker)) if "SELFTEST" in i}
     if before:
         return set(), f"the receipt was rejected before the edit: {sorted(before)}"
@@ -190,8 +211,29 @@ def _receipt_survives_an_edit(tmp: Path) -> tuple[set[str], str]:
     return after, f"quiet with a matching receipt, {sorted(after)} after one byte"
 
 
-def _finding_lines(ws: Path, checker: Path) -> set[str]:
-    out = scan(ws, checker=checker).stdout
+def _hook_hangs(tmp: Path) -> tuple[set[str], str]:
+    """A hook that does not come back.
+
+    The real threshold is 25 seconds, and waiting it out on every run of this
+    suite is 25 seconds of nothing. The copy runs with the threshold rewritten
+    to one second against a hook that sleeps three: same branch, same code path,
+    a wait a test can afford. The substitution is asserted — without that check
+    a renamed constant would turn this into a test of a checker that never times
+    out, passing quietly."""
+    checker, ws = _portable(tmp, "hang")
+    src = checker.read_text(encoding="utf-8")
+    patched = src.replace("timeout=HOOK_TIMEOUT,", "timeout=1,")
+    if patched == src:
+        return set(), "the timeout is no longer written as HOOK_TIMEOUT; case is stale"
+    checker.write_text(patched, encoding="utf-8")
+    (ws / "alpha" / ".claude" / "hooks" / "nudge.sh").write_text(
+        "#!/bin/bash\nsleep 3\n", encoding="utf-8")
+    ids = rule_ids(_finding_lines(ws, checker, execute=True))
+    return ids, "threshold rewritten to 1s in a copy, hook sleeps 3s"
+
+
+def _finding_lines(ws: Path, checker: Path, execute: bool = False) -> set[str]:
+    out = scan(ws, execute=execute, checker=checker).stdout
     return {l.strip() for l in out.splitlines() if l.strip().startswith("[")}
 
 
@@ -270,9 +312,31 @@ MUTATIONS = [
          mutate=_outside_root, expect="SR-HOOK-003", mode="execute",
          check=_no_sentinel),
 
-    # Breaks the checker rather than the fixture, so it runs its own copy.
+    # These break the checker rather than the fixture, so they run their own
+    # copy of it. Every receipt state the checker claims to recognise gets one:
+    # before this, four of them were rules nothing here ever made speak.
     dict(name="receipt no longer matches the code it attests to",
          custom=_receipt_survives_an_edit, expect="SR-SELFTEST-005"),
+
+    dict(name="mutation test has never passed here",
+         custom=_receipt_case("none", None), expect="SR-SELFTEST-001"),
+
+    dict(name="receipt is not readable",
+         custom=_receipt_case("broken", "{ not json"), expect="SR-SELFTEST-002"),
+
+    dict(name="receipt records a run that did not finish",
+         custom=_receipt_case("partial", {
+             "date": date.today().isoformat(), "mutations": 17, "passed": 16,
+             "code_sha256": "<self>"}),
+         expect="SR-SELFTEST-003"),
+
+    dict(name="receipt is older than the threshold",
+         custom=_receipt_case("old", {
+             "date": OLD, "mutations": 1, "passed": 1, "code_sha256": "<self>"}),
+         expect="SR-SELFTEST-004"),
+
+    dict(name="hook hangs and is reported rather than waited on forever",
+         custom=_hook_hangs, expect="SR-HOOK-005"),
 
     dict(name="config file does not parse",
          mutate=lambda ws: _config(ws, "stale_days = \n"),
