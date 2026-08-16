@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-VERSION = "0.2.0-dev"
+VERSION = "0.2.0"
 
 # The four things that actually differ between workspaces, and nothing else.
 # A queue whose rows say `todo` is invisible to a checker looking for
