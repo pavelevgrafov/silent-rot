@@ -166,14 +166,17 @@ Measure one thing above all — **time from a defect existing to it being found*
 
 ## How wrong is it?
 
-Pointed at 16 public repositories nobody here wrote, on 2026-08-16, in two rounds. The second ten were never used to derive any fix, so they measure the tool rather than the tuning:
+Pointed at 26 public repositories nobody here wrote, on 2026-08-16, in three rounds. Each round's repositories were unseen when it started, so each measures the tool rather than the tuning:
 
-| sample | at first contact | true | after the fixes it exposed | true |
-|---|---|---|---|---|
-| six repositories | 44 | 2 | 3 | 2 |
-| ten more, unseen | 73 | 6 | 18 | 6 |
+| sample | at first contact | true | after the fixes it exposed |
+|---|---|---|---|
+| six repositories | 44 | 2 | 3 |
+| ten more, unseen | 73 | 6 | 18 |
+| ten more, unseen again | 75 | ~1 | 44 |
 
-**First contact is the honest column: about one finding in fourteen was true.** Both "after" columns are fitted to the sample that produced the fixes and are upper bounds, not estimates. What the second round shows is that the first round's fixes did *not* generalise much on their own — the same 5–8% turned up again on repositories the tool had never seen.
+**About one finding in twenty was true, and three rounds of fixing did not converge.** Every round found new false families rather than the same ones: documents describing a layout the repo installs elsewhere, then paths written relative to a package directory, then an indented tree where a child folder written bare means its parent's folder plus that name, then a C++ header-and-source pair written as one word, then Go module paths that look exactly like directories.
+
+The honest reading is that **`SR-REF-001` is a home-domain rule**: on the workspace it was built for it runs at 17 true findings out of 20, and on repositories written by other people it runs at about one in twenty. A document does not have to describe the tree it sits in, and outside one particular way of working it usually does not.
 
 One number is worth more than the precision: **all 8 true findings survived every fix.** Each narrowing was checked against that, or a rule that reports nothing would score perfectly.
 
