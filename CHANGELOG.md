@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### A third round, and the conclusion it forced
+
+Ten more unseen repositories, this time ordinary software projects rather than agent setups: 75 findings, almost none true. Three misreadings of a document — not judgement calls — were fixed:
+
+- **an indented tree.** A README drawing its layout as a nested list writes each child bare; `core/` under `intentkit/` means `intentkit/core/`. Reading each line from the root reported eighteen directories missing in one repository, every one of them present.
+- **`Core.h/cpp`**, which names two files in one word, and `Languages/XX/translation.ts`, where `XX` is a placeholder.
+- **`github.com/namecheap/go-namecheap-sdk/v2`**, a module path that looks exactly like a directory.
+
+Then it stopped. Three rounds, 26 repositories, and each round found *new* false families rather than the same ones — installed layouts, then package-relative paths, then indented trees, then language notations. That is not a bug list, it is a shape: **`SR-REF-001` assumes a document describes the tree it sits in**, and outside the way of working it was built for, documents usually do not.
+
+The README publishes it as a home-domain rule: 17 of 20 true on the workspace it comes from, about one in twenty on other people's repositories, with the three rounds shown separately so nobody has to take the average on trust.
+
 ### Ten more repositories, and the number that did not move
 
 The six repositories that produced the first round of fixes could no longer measure anything: the tool had been fitted to them. Ten more, never used to derive a fix, gave **73 findings with 6 true — 8%**, against 5% at first contact on the first six. The fixes had not generalised.

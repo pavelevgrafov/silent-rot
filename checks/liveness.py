@@ -511,12 +511,16 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
 # `style-tokens/*.yaml`, `kebab-case.md`. Checking them for existence is a
 # category error, and the reader who reads three of them stops reading the list.
 PATTERN_SPAN = re.compile(
-    r"[<>{}*?()|$\\]"                       # placeholder or shell metacharacter
+    r"[<>{}*?()|$\\\[\]…]"                  # placeholder or shell metacharacter
     r"|\]\("                                # a markdown link, not a path
-    r"|\bYYYY\b|\bMM\b|\bDD\b"              # date template
+    r"|\bYYYY\b|\bMM\b|\bDD\b|\bXX\b"       # date and language templates
     r"|\bslug\b|\bkebab-case\b|\bsnake_case\b|\bcamelCase\b"
     r"|@|path/to"                           # `@path/to/file.md`, a stand-in
+    r"|\.\w{1,4}/\w{1,4}$"                  # `Core.h/cpp` — two files, one word
     r"|название", re.I)
+# `github.com/namecheap/go-namecheap-sdk/v2` is a module, and `golang.org/x/net`
+# is a domain. Neither is a path on disk, and both look exactly like one.
+MODULE_PATH = re.compile(r"^[\w-]+(\.[\w-]+)+/")
 
 
 # The headline class of the audit this repo comes from: the check exists, is
@@ -769,7 +773,19 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
         deferred = {raw for l in lines if planned.search(l.lower())
                     for raw in pat.findall(l)}
         already: set[str] = set()
+        # A README that draws its layout as an indented list writes each child
+        # bare, with the indentation carrying the parent:
+        #     - `intentkit/` — pip package
+        #       - `core/` — agent system
+        # `core/` means `intentkit/core/`, and reading it from the root reported
+        # eighteen directories missing in one repository, every one of them
+        # present. The stack holds (indent, prefix) for the enclosing folders.
+        tree: list[tuple[int, str]] = []
         for lineno, line in enumerate(lines, 1):
+            indent = len(line) - len(line.lstrip())
+            while tree and tree[-1][0] >= indent:
+                tree.pop()
+            nested = tree[-1][1] if tree else ""
             for raw in sorted(set(pat.findall(line))):
                 if raw in already:
                     continue
@@ -783,6 +799,9 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
                     continue
                 if PATTERN_SPAN.search(raw):
                     skip("paths", "naming pattern, not a path")
+                    continue
+                if MODULE_PATH.match(raw):
+                    skip("paths", "module or domain, not a path on disk")
                     continue
                 if raw.count("/") == 1 and "." not in raw and not raw.endswith("/"):
                     skip("paths", "Owner/Repo slug, not a path on disk")
@@ -832,6 +851,13 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
                         # a found one.
                         target = root / raw
                         ok = target.exists()
+                    if not ok and nested:
+                        for cand in (f.parent / (nested + raw),
+                                     owner / (nested + raw),
+                                     root / (nested + raw)):
+                            if cand.exists():
+                                target, ok = cand, True
+                                break
                     if not ok:
                         # "In `Research`, see `inbox/`" — the project named in
                         # the prose beside the reference, and only that.
@@ -839,6 +865,9 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
                             if n in line and (root / n / raw).exists():
                                 target, ok = root / n / raw, True
                                 break
+                if raw.endswith("/"):
+                    # Whatever this line resolved to, deeper lines are inside it.
+                    tree.append((indent, nested + raw))
                 if ok and raw.endswith("/") and target.is_dir():
                     # The document presents this directory as part of the
                     # structure. That declaration is what makes an empty one
