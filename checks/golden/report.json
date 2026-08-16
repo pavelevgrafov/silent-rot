@@ -62,6 +62,18 @@
       "outside": 0,
       "missing": 0
     },
+    "workflows": {
+      "discovered": 0,
+      "checked": 0,
+      "skipped": 0,
+      "skipped_reasons": {}
+    },
+    "wiring": {
+      "discovered": 0,
+      "checked": 0,
+      "skipped": 0,
+      "skipped_reasons": {}
+    },
     "paths": {
       "discovered": 3,
       "checked": 2,

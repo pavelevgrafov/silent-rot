@@ -237,6 +237,35 @@ def _finding_lines(ws: Path, checker: Path, execute: bool = False) -> set[str]:
     return {l.strip() for l in out.splitlines() if l.strip().startswith("[")}
 
 
+def _workflow(ws: Path, body: str, name: str = "ci.yml") -> Path:
+    d = ws / "alpha" / ".github" / "workflows"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(body, encoding="utf-8")
+    return d / name
+
+
+def _script_called_automatic(ws: Path) -> None:
+    """The class this whole repo exists for: the check is written, it is
+    documented as running by itself, and nothing calls it."""
+    (ws / "alpha" / "scripts").mkdir()
+    (ws / "alpha" / "scripts" / "validate.sh").write_text(
+        "#!/bin/bash\nexit 0\n", encoding="utf-8")
+    (ws / "alpha" / "CLAUDE.md").write_text(
+        "# alpha\n\nThe queue lives in `queue.md`.\n"
+        "`scripts/validate.sh` runs automatically on every commit and blocks "
+        "the merge when it fails.\n", encoding="utf-8")
+
+
+def _script_wired_to_a_hook(ws: Path) -> None:
+    """The same claim as _script_called_automatic, and this time it is true:
+    a settings file names the script. The rule must stay silent."""
+    _script_called_automatic(ws)
+    hook = ws / "alpha" / "scripts" / "validate.sh"
+    (ws / "alpha" / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": f'"{hook}"'}]}]}}), encoding="utf-8")
+
+
 def _config(ws: Path, body: str) -> None:
     (ws / CONFIG_NAME).write_text(body, encoding="utf-8")
 
@@ -337,6 +366,26 @@ MUTATIONS = [
 
     dict(name="hook hangs and is reported rather than waited on forever",
          custom=_hook_hangs, expect="SR-HOOK-005"),
+
+    # The class the case study leads with: written, documented, wired to nothing.
+    dict(name="workflow nothing in the repository can start",
+         mutate=lambda ws: _workflow(ws, "name: ci\non:\n  workflow_dispatch:\n"
+                                         "jobs:\n  a:\n    runs-on: ubuntu-latest\n"),
+         expect="SR-WIRE-001"),
+
+    dict(name="workflow path filter matches no file in the tree",
+         mutate=lambda ws: _workflow(ws, "name: ci\non:\n  push:\n    paths:\n"
+                                         "      - 'src/**'\n"
+                                         "jobs:\n  a:\n    runs-on: ubuntu-latest\n"),
+         expect="SR-WIRE-002"),
+
+    dict(name="documented as automatic, named by nothing that runs",
+         mutate=_script_called_automatic, expect="SR-WIRE-003"),
+
+    dict(name="trigger block this checker cannot read is reported as unread",
+         mutate=lambda ws: _workflow(ws, "name: ci\non: &base\n  push:\n"
+                                         "jobs:\n  a:\n    runs-on: ubuntu-latest\n"),
+         expect="SR-WIRE-004"),
 
     dict(name="config file does not parse",
          mutate=lambda ws: _config(ws, "stale_days = \n"),
@@ -594,8 +643,43 @@ def acc_quiet_about_the_ordinary(ws: Path, tmp: Path) -> tuple[bool, str]:
     return True, "one true reference finding, no folder noise"
 
 
+def acc_quiet_about_wired_things(ws: Path, tmp: Path) -> tuple[bool, str]:
+    """A healthy workflow, and a script that really is called, must produce
+    nothing. `SR-WIRE-*` is `info` on a subject where the tool is guessing at
+    intent, so its silence matters more than its speech: four findings about
+    working automation would end anyone's habit of reading the list."""
+    cases = [
+        ("an ordinary trigger", lambda w: _workflow(
+            w, "name: ci\non: [push, pull_request]\njobs:\n  a:\n"
+               "    runs-on: ubuntu-latest\n")),
+        # Filters are relative to the repository the workflow lives in, which
+        # here is alpha and not the scan root. Getting this wrong in the fixture
+        # is the same mistake the checker used to make about declared paths.
+        ("a filter that does match", lambda w: _workflow(
+            w, "name: ci\non:\n  push:\n    paths:\n      - '**/*.md'\n"
+               "jobs:\n  a:\n    runs-on: ubuntu-latest\n")),
+        ("a reusable workflow", lambda w: _workflow(
+            w, "name: lib\non:\n  workflow_call:\njobs:\n  a:\n"
+               "    runs-on: ubuntu-latest\n")),
+        ("a script a hook really calls", _script_wired_to_a_hook),
+    ]
+    for label, arrange in cases:
+        work = tmp / f"wired-{abs(hash(label))}"
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir()
+        w = build_fixture(work)
+        arrange(w)
+        noisy = sorted(i for i in rule_ids(_finding_lines(w, CHECKER))
+                       if i.startswith("SR-WIRE"))
+        if noisy:
+            return False, f"{label}: reported {noisy}"
+    return True, f"{len(cases)} wired things, nothing said about any of them"
+
+
 ACCEPTANCE = [
     ("every config key changes what the scan does", acc_config_keys_do_something),
+    ("quiet about automation that is wired", acc_quiet_about_wired_things),
     ("quiet about ordinary structure", acc_quiet_about_the_ordinary),
     ("json and text report the same numbers", acc_json_matches_text),
     ("json mode keeps stdout parseable", acc_json_is_alone_on_stdout),

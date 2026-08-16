@@ -38,7 +38,15 @@ Run the machine-checkable subset against a directory:
 python3 checks/liveness.py /path/to/your/workspace
 ```
 
-It reports declared paths that do not resolve, hooks declared but missing, hook commands it cannot read statically, invalid settings files, declared folders sitting empty, queue rows gone stale, and hand-written counts worth verifying. It is a report, not a gate: the exit code is 0 either way.
+It reports declared paths that do not resolve, hooks declared but missing, hook commands it cannot read statically, invalid settings files, declared folders sitting empty, queue rows gone stale, hand-written counts worth verifying, and automation that nothing can start. It is a report, not a gate: the exit code is 0 either way.
+
+The last of those is the class this repo leads with — **written but never wired**. Three forms are decidable without running anything:
+
+- a workflow no event in the repository can start (only `workflow_dispatch`, so it runs when a human remembers to press the button);
+- a workflow whose `paths:` filter matches no file that exists;
+- a script a document says runs by itself, that no workflow, hook or other script ever names.
+
+All three are `info`, and the third only fires when the document itself claims automation ("runs automatically", "blocks the merge", "on every commit"). A script you run by hand is not a defect and is never reported. A trigger block written in YAML this checker does not parse is reported as *unread* rather than passed — the whole point being that silence about an unchecked mechanism is what this tool exists to break.
 
 Each finding carries a stable rule id:
 
