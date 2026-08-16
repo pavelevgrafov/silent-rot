@@ -58,7 +58,7 @@ A reference is resolved against the directory of the document that declares it, 
 
 The empty-folder rule reads the same declarations: it fires on a directory a document presents as part of the structure, not on every empty folder it can find.
 
-`warning` is a fact the checker established and you can act on; `info` is a fact whose significance only you can settle — a hand-written count may be right, a parked queue row may be parked on purpose. The id is what stays put: message wording changes between releases, `SR-REF-001` does not, so it is what to grep for, script against, and cite in a bug report.
+`warning` is a fact the checker established and you can act on — a settings file that does not parse, a hook whose file is not there. `info` is a fact whose significance only you can settle — a hand-written count may be right, a parked queue row may be parked on purpose. The id is what stays put: message wording changes between releases, `SR-REF-001` does not, so it is what to grep for, script against, and cite in a bug report.
 
 Every run ends with what was looked at, class by class:
 
@@ -177,6 +177,8 @@ Pointed at 26 public repositories nobody here wrote, on 2026-08-16, in three rou
 **About one finding in twenty was true, and three rounds of fixing did not converge.** Every round found new false families rather than the same ones: documents describing a layout the repo installs elsewhere, then paths written relative to a package directory, then an indented tree where a child folder written bare means its parent's folder plus that name, then a C++ header-and-source pair written as one word, then Go module paths that look exactly like directories.
 
 The honest reading is that **`SR-REF-001` is a home-domain rule**: on the workspace it was built for it runs at 17 true findings out of 20, and on repositories written by other people it runs at about one in twenty. A document does not have to describe the tree it sits in, and outside one particular way of working it usually does not.
+
+It is `info` for that reason, not because a missing path is unimportant. Severity here reports measured precision, not how much the tool would like you to care.
 
 One number is worth more than the precision: **all 8 true findings survived every fix.** Each narrowing was checked against that, or a rule that reports nothing would score perfectly.
 

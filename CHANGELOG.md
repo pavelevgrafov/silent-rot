@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Severity now reports measured precision
+
+`SR-REF-001` drops from `warning` to `info`. Not because a missing path is unimportant, but because the number says what it is worth: 17 true out of 20 on the workspace it was built for, about one in twenty on 26 repositories written by other people. A rule that cannot tell those two situations apart should not be the loudest thing in a report about someone else's tree.
+
+`warning` is now reserved for facts the checker established without interpreting anything — a settings file that does not parse, a hook whose file is not on disk, a receipt that no longer matches the code.
+
 ### A third round, and the conclusion it forced
 
 Ten more unseen repositories, this time ordinary software projects rather than agent setups: 75 findings, almost none true. Three misreadings of a document — not judgement calls — were fixed:
