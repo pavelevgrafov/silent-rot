@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Ten more repositories, and the number that did not move
+
+The six repositories that produced the first round of fixes could no longer measure anything: the tool had been fitted to them. Ten more, never used to derive a fix, gave **73 findings with 6 true — 8%**, against 5% at first contact on the first six. The fixes had not generalised.
+
+Four more defects, all of the same family — the checker answering from its own machine or its own convenience rather than from the tree:
+
+- a bare command name absent from *this* machine's `PATH` reported as a missing file. One repository declares `entire hooks claude-code session-start` for seven events and expects its own CLI installed; seven live hooks were called missing. A bare name is now counted as an external program and never as missing.
+- one README produced **47 separate findings** for the counts in its own section table. `SR-COUNT-001` now reports once per document, quoting the first three.
+- `1080×1920 file` read as a count of files. A digit preceded by `×`, `x`, `-` or `/` is a dimension or a range.
+- `@path/to/file.md` checked as a path.
+
+After those, the ten give 18 findings and the same 6 true. **All 8 true findings across both samples survived every narrowing** — the property to guard, because a rule that reports nothing has perfect precision.
+
+Three false-positive classes are left unfixed and documented instead: paths that exist only after something runs, references to *your* repository rather than the scanned one, and counts that turn out correct. Fixing those would mean guessing at intent, and the tool would rather name a limit than hide it.
+
 ### Six repositories nobody here wrote
 
 The tool had only ever been measured at home, on a workspace written by the same person it was built for. Pointed at six public repositories for the first time, it produced **44 findings, two of them true** — and seven defects in itself.
