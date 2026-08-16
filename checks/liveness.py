@@ -85,7 +85,11 @@ RULES = {
     "SR-HOOK-003": "info",          # hook resolves outside the scanned root
     "SR-HOOK-004": "warning",       # executed hook exits non-zero
     "SR-HOOK-005": "warning",       # executed hook hangs
-    "SR-REF-001": "warning",        # path declared in a document does not resolve
+    # Measured, not assumed: 17 true findings out of 20 on the workspace this
+    # rule was built for, and about one in twenty on 26 repositories written by
+    # other people. A document is not obliged to describe the tree it sits in,
+    # so the reference rules answer to the reader rather than to the tool.
+    "SR-REF-001": "info",           # path declared in a document does not resolve
     "SR-EMPTY-001": "info",         # declared folder exists and is empty
     "SR-QUEUE-001": "info",         # queue rows unprocessed past the threshold
     "SR-COUNT-001": "info",         # hand-written count worth verifying

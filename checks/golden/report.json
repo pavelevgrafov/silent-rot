@@ -33,8 +33,8 @@
     "checks": 9,
     "findings": 5,
     "by_severity": {
-      "info": 3,
-      "warning": 2
+      "info": 4,
+      "warning": 1
     },
     "by_rule": {
       "SR-COUNT-001": 1,
@@ -113,7 +113,7 @@
   "findings": [
     {
       "rule": "SR-REF-001",
-      "severity": "warning",
+      "severity": "info",
       "path": "beta/CLAUDE.md",
       "line": 3,
       "message": "declared but missing: docs/handbook.md"
