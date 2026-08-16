@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -163,7 +164,8 @@ coverage = {c: {"discovered": 0, "checked": 0, "skipped": 0, "skipped_reasons": 
 # Hooks carry their own breakdown: "checked" for a hook means read, and reading
 # a hook proves nothing about whether it runs.
 coverage["hooks"] |= {"inspected_statically": 0, "executed": 0,
-                      "unsupported": 0, "outside": 0, "missing": 0}
+                      "unsupported": 0, "outside": 0, "missing": 0,
+                      "external": 0}
 
 
 def add(rule: str, message: str, path: str = "", line: int | None = None) -> None:
@@ -301,6 +303,17 @@ def skip(cls: str, reason: str, n: int = 1) -> None:
         coverage[cls]["skipped_reasons"].get(reason, 0) + n
 
 
+def recount(cls: str, reason: str) -> None:
+    """Move one unit from checked to skipped.
+
+    Some skips can only be decided after the attempt: whether an unresolved
+    reference is a broken link or a description of an installed layout is known
+    only once it fails to resolve. Without this the class would count the same
+    span twice and `discovered = checked + skipped` would stop holding."""
+    coverage[cls]["checked"] -= 1
+    skip(cls, reason)
+
+
 def read_text(f: Path, cls: str) -> str | None:
     """A file that could not be opened is a file that was not checked.
 
@@ -379,6 +392,11 @@ def classify_command(command: str, base: Path, root: Path) -> tuple[str, list[st
         target, rest, prefix = argv[1], argv[2:], [argv[0]]
     else:
         target, rest, prefix = argv[0], argv[1:], []
+        if "/" not in target and shutil.which(target):
+            # A program on PATH, not a script in the tree: `afplay a-sound.aiff`
+            # as a Stop hook. Resolving it against the settings directory
+            # reported a healthy hook as missing — found on a real repository.
+            return "external", [], Path(shutil.which(target)), "a program on PATH"
 
     resolved = (base / target).resolve() if not os.path.isabs(target) else Path(target).resolve()
     if not resolved.is_file():
@@ -388,6 +406,12 @@ def classify_command(command: str, base: Path, root: Path) -> tuple[str, list[st
         # what cannot be claimed is that this scan checked it.
         return "outside", [], resolved, "lives outside the scanned root"
     return "supported", prefix + [str(resolved)] + rest, resolved, ""
+
+
+def project_root(settings_file: Path) -> Path:
+    """The directory a hook command is written from: the one holding `.claude`."""
+    d = settings_file.parent
+    return d.parent if d.name == ".claude" else d
 
 
 def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
@@ -408,8 +432,14 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                     declared.add(command)
                     seen("hooks")
                     check("hooks")
+                    # Hook commands are written from the project root, which is
+                    # where the agent runs them — `.claude/hooks/x.sh`, not
+                    # `hooks/x.sh`. Resolving them beside the settings file
+                    # looked for `.claude/.claude/hooks/x.sh` and reported three
+                    # healthy hooks as missing on the first foreign repository
+                    # this was ever pointed at.
                     kind, argv, resolved, note = classify_command(
-                        command, p.parent, root)
+                        command, project_root(p), root)
 
                     if kind == "missing":
                         coverage["hooks"]["missing"] += 1
@@ -423,6 +453,12 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                             f"hook command not statically supported, not executed "
                             f"({note}): {command.strip()[:100]} (event {event})",
                             rel(p, root))
+                        continue
+                    if kind == "external":
+                        # Counted, never executed: the same rule as a hook
+                        # outside the root. The scan cannot claim to have
+                        # checked a program it did not look at.
+                        coverage["hooks"]["external"] += 1
                         continue
                     if kind == "outside":
                         coverage["hooks"]["outside"] += 1
@@ -442,7 +478,8 @@ def check_hooks(root: Path, settings: list[Path], execute: bool) -> None:
                         # blocks forever and the check misreports it as a hang.
                         r = subprocess.run(
                             argv, input="{}", capture_output=True, text=True,
-                            timeout=HOOK_TIMEOUT, cwd=str(p.parent), shell=False,
+                            timeout=HOOK_TIMEOUT, cwd=str(project_root(p)),
+                            shell=False,
                             env={k: os.environ[k] for k in SAFE_ENV_KEYS
                                  if k in os.environ})
                         if r.returncode != 0:
@@ -644,6 +681,14 @@ def check_wiring(root: Path, cfg: dict) -> None:
                     check("wiring")
                     if Path(raw).name in wired:
                         continue
+                    # An installer that loops over the directory wires every
+                    # script in it without ever writing one of their names:
+                    #   for f in "${hooks_src}"/*.py; do ... done
+                    # Searching for the name alone called two live hooks dead.
+                    ext = target.suffix.lstrip(".")
+                    if re.search(rf"{re.escape(target.parent.name)}[^\n]*\*\.{ext}\b",
+                                 wired):
+                        continue
                     add("SR-WIRE-003",
                         f"described as running by itself, and named by no "
                         f"workflow, hook or script: {raw}", rel(f, root), lineno)
@@ -659,15 +704,40 @@ def read_or_none(p: Path) -> str | None:
 # 3. Paths quoted in instruction files still resolve. The resolution rules were
 #    each learned by getting them wrong — see the comment on `base` below, which
 #    cost this checker 92 false findings in a single run.
+INSTALLER = re.compile(r"^(install|setup|bootstrap)\.(sh|bash|py)$", re.I)
+INSTALLS_ELSEWHERE = re.compile(r"\$HOME|~/|XDG_|/usr/local")
+
+
+def installs_elsewhere(project: Path, root: Path, cfg: dict) -> bool:
+    """Does this tree exist to be copied somewhere else?
+
+    A dotfiles repo, a template kit or a starter documents the layout it
+    *creates* — `.claude/docs/`, `inbox/`, `notes/` — none of which exist where
+    the document sits. Four of the six repositories in the first field test were
+    this shape, and every reference the checker reported in them was a true
+    statement about the wrong tree.
+
+    The signal is an installer beside the document that writes outside the tree.
+    Narrow on purpose: a repository without one is checked exactly as before.
+    """
+    for p in project.glob("*"):
+        if p.is_file() and INSTALLER.match(p.name) and not excluded(p, root, cfg):
+            text = read_or_none(p)
+            if text and INSTALLS_ELSEWHERE.search(text):
+                return True
+    return False
+
+
 def check_paths(root: Path, cfg: dict) -> set[Path]:
     pat = re.compile(r"`([^`\s]+?/[^`\s]*|[^`\s]+?\.(?:md|sh|py|json|ya?ml))`")
     planned = re.compile(r"not created|planned|future|later|не создан|планир")
-    # Only real top-level projects may pull a reference back to the root. The
-    # previous version used every first- and second-level directory, so ordinary
-    # folder names — inbox, reports, tasks, audit — counted as project names.
+    # Top-level projects, used only for the prose rule below: "in `Research`,
+    # see `inbox/`". Resolution itself no longer consults this list — treating
+    # every folder name as a project name is what made 92 findings false.
     tops = {d.name for d in root.glob("*")
             if d.is_dir() and not d.name.startswith(".") and not excluded(d, root, cfg)}
     declared_dirs: set[Path] = set()
+    installers: dict[Path, bool] = {}
     files = [f for pr in [root] + projects(root, cfg)
              for n in cfg["instruction_files"] if (f := pr / n).is_file()]
     for f in files:
@@ -679,6 +749,13 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
         # the directory the file is already in.
         parts = Path(rel(f, root)).parts
         owner = root / parts[0] if len(parts) > 1 else root
+        # The installer usually sits at the top of the repository, while the
+        # documents describing the installed layout sit in subdirectories, so
+        # both the document's own project and the scan root have to be asked.
+        for d in (owner, root):
+            if d not in installers:
+                installers[d] = installs_elsewhere(d, root, cfg)
+        installed = installers[owner] or installers[root]
         lines = text.splitlines()
         # A folder marked planned on any one line is planned everywhere in that
         # document — the same folders get enumerated again in later sections.
@@ -716,6 +793,14 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
                 check("paths")
                 if raw.startswith(("~", "/")):
                     target = Path(os.path.expanduser(raw))
+                    if root not in target.parents and target != root:
+                        # A path outside the tree is a claim about a machine,
+                        # not about this repository. Checking it answered from
+                        # the auditor's own home directory, which is how a
+                        # dotfiles repo describing `~/.claude/hooks/` collected
+                        # three findings that said nothing about the repo.
+                        recount("paths", "outside the scanned tree")
+                        continue
                     ok = target.exists()
                 else:
                     # The document's own directory, first and by default. The
@@ -732,8 +817,12 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
                         # Bannerzila/prompts/README.md means Bannerzila/docs.
                         target = owner / raw
                         ok = target.exists()
-                    first = raw.split("/")[0]
-                    if not ok and first in tops:
+                    if not ok:
+                        # Last, never first: a nested document naming `.git/` or
+                        # `.github/…` means the root of the tree. Trying the
+                        # root *first* is what produced 92 false findings in
+                        # 0.2; trying it last can only turn a missing path into
+                        # a found one.
                         target = root / raw
                         ok = target.exists()
                     if not ok:
@@ -748,7 +837,13 @@ def check_paths(root: Path, cfg: dict) -> set[Path]:
                     # structure. That declaration is what makes an empty one
                     # worth reporting; see check_declared_but_empty.
                     declared_dirs.add(target.resolve())
-                if not ok:
+                if not ok and installed:
+                    # Counted, not reported: in a tree that installs itself
+                    # somewhere else, an unresolved reference is at least as
+                    # likely to describe the installed layout as a broken link,
+                    # and the checker cannot tell the two apart.
+                    recount("paths", "this tree installs itself elsewhere")
+                elif not ok:
                     add("SR-REF-001", f"declared but missing: {raw}",
                         rel(f, root), lineno)
     return declared_dirs
@@ -896,7 +991,8 @@ def hook_summary(execute: bool) -> str:
     if not c["discovered"]:
         return "hooks: none declared"
     tail = (f", {c['unsupported']} unsupported" if c["unsupported"] else "") + \
-           (f", {c['outside']} outside the root" if c["outside"] else "")
+           (f", {c['outside']} outside the root" if c["outside"] else "") + \
+           (f", {c['external']} programs on PATH" if c["external"] else "")
     if execute:
         return (f"hooks: {c['discovered']} declared, {c['executed']} executed{tail}")
     return (f"hooks: {c['discovered']} declared, {c['inspected_statically']} "

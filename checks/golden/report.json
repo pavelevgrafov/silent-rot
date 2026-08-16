@@ -60,7 +60,8 @@
       "executed": 0,
       "unsupported": 0,
       "outside": 0,
-      "missing": 0
+      "missing": 0,
+      "external": 0
     },
     "workflows": {
       "discovered": 0,
