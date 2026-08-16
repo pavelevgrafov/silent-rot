@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### The rule this project is actually about
+
+The case study leads with a class the checker had no rule for: the check exists, it is documented, and nothing ever calls it. One validator in that audit was described as blocking; it had never run, and the first time it was triggered by hand it found five real violations that had sat for months.
+
+Three decidable forms, all `info`:
+
+- `SR-WIRE-001` — a workflow no event in the repository can start. Only `workflow_dispatch` and `repository_dispatch` count as manual; `workflow_call` deliberately does not, because a reusable workflow is called by another one, and that is wiring rather than silence.
+- `SR-WIRE-002` — a `paths:` filter that matches no file that exists. Filters resolve against the repository the workflow lives in, not against the scan root.
+- `SR-WIRE-003` — a script a document says runs by itself, named by no workflow, hook or other script. It fires only when the document claims automation in so many words ("runs automatically", "blocks the merge", "on every commit"): a script somebody runs by hand is not a defect, and reporting one would teach the reader to skim the list.
+
+`SR-WIRE-004` is the honest half: a trigger block written in YAML this checker does not parse — anchors, aliases, merge keys, block scalars — is reported as *unread*, never as fine. The parser covers the shapes workflow files actually use and refuses the rest rather than guessing, the same rule the hook command parser has followed since 0.1.1. It also validates what it produced, not only what went in: an anchor on the `on:` line itself first slipped through as an event named `&base`, and the workflow then looked perfectly wired.
+
+Each rule has a mutation, and all four together have a test that asserts silence — an ordinary trigger, a filter that does match, a reusable workflow, and a script a hook really calls. On a rule that guesses at intent, silence is the half that matters.
+
 ### The five rules nothing proved
 
 0.2.0 shipped printing its own gap: five of seventeen rules had no mutation, four of them receipt states and one a hook that hangs. A rule with nothing making it speak is not implemented, however carefully it is written — so the suite said so on every run, and this closes it. 22 mutations, 17 of 17 rules.

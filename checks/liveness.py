@@ -95,6 +95,10 @@ RULES = {
     "SR-SELFTEST-005": "warning",   # receipt attests to different code
     "SR-CONFIG-001": "warning",     # config file present and unusable
     "SR-CONFIG-002": "warning",     # a key in the config does nothing
+    "SR-WIRE-001": "info",          # workflow nothing in the repository triggers
+    "SR-WIRE-002": "info",          # workflow path filter matches no file
+    "SR-WIRE-003": "info",          # documented as automatic, wired to nothing
+    "SR-WIRE-004": "info",          # workflow trigger block could not be read
 }
 
 # The files a passing mutation run actually attests to. Sorted and named, so
@@ -144,6 +148,8 @@ class Finding:
 CLASSES = {
     "settings": "settings files",
     "hooks": "hook commands",
+    "workflows": "workflow trigger blocks",
+    "wiring": "documents' claims that something runs by itself",
     "paths": "paths declared in documents",
     "folders": "folders inside projects",
     "queues": "pending queue rows",
@@ -467,6 +473,187 @@ PATTERN_SPAN = re.compile(
     r"|\bYYYY\b|\bMM\b|\bDD\b"              # date template
     r"|\bslug\b|\bkebab-case\b|\bsnake_case\b|\bcamelCase\b"
     r"|название", re.I)
+
+
+# The headline class of the audit this repo comes from: the check exists, is
+# documented, and nothing ever calls it. One such validator here was described
+# as blocking; it had never run, and the first time it was triggered by hand it
+# found five real violations that had sat for months.
+#
+# Only the statically decidable forms are attempted. A workflow that no event
+# in the repository can start, a path filter that matches nothing, and a script
+# a document says runs by itself while no workflow, hook or script names it.
+WORKFLOW_DIR = ".github/workflows"
+# Events that never fire on their own. `workflow_call` is deliberately absent:
+# a reusable workflow is called by another one, which is wiring, not silence.
+MANUAL_ONLY = {"workflow_dispatch", "repository_dispatch"}
+# Anchors, aliases, merge keys, tags and block scalars. Each of them can change
+# what the trigger block means, and a checker that guesses at YAML is a checker
+# that reports confidently about a file it did not understand.
+YAML_HARD = re.compile(r"(?:^|\s)(?:[&*]\w|<<\s*:|!!)|:\s*[|>][-+\d]*\s*$")
+AUTOMATION = re.compile(
+    r"automatic|automated|on every|each commit|pre-commit|precommit|in ci\b"
+    r"|blocks|gate[sd]?\b|enforced|автомат|при кажд|блокир|перед коммит", re.I)
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _inline_list(value: str) -> list[str]:
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    return [v.strip().strip("'\"") for v in value.split(",") if v.strip()]
+
+
+def workflow_triggers(text: str) -> tuple[dict[str, list[str]], str]:
+    """The `on:` block of a workflow, as far as a small parser can honestly go.
+
+    Returns ({event: positive path filters}, note). A non-empty note means the
+    block was not understood and the caller must say so rather than conclude
+    the workflow is fine — silence about an unread file is the defect this repo
+    is named after.
+    """
+    lines = [l.rstrip() for l in text.splitlines()]
+    start = None
+    for i, line in enumerate(lines):
+        m = re.match(r"""^(?:on|"on"|'on')\s*:\s*(.*)$""", line)
+        if m and _indent(line) == 0:
+            start, head = i, m.group(1).split("#")[0].strip()
+            break
+    if start is None:
+        return {}, "no trigger block"
+
+    if head:
+        events = [e for e in _inline_list(head) if e]
+        # Validate what the parse produced, not just what went into it: an
+        # anchor on the `on:` line itself once slipped through as an event
+        # named `&base`, and the workflow then looked perfectly wired.
+        if YAML_HARD.search(head) or not all(re.fullmatch(r"[\w-]+", e) for e in events):
+            return {}, "trigger line uses yaml this checker does not parse"
+        return {e: [] for e in events}, ""
+
+    body = []
+    for line in lines[start + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if _indent(line) == 0:
+            break
+        body.append(line)
+    if not body:
+        return {}, "trigger block is empty"
+    if any(YAML_HARD.search(l) for l in body):
+        return {}, "trigger block uses yaml this checker does not parse"
+
+    base = _indent(body[0])
+    events: dict[str, list[str]] = {}
+    current, in_paths = None, False
+    for line in body:
+        ind, stripped = _indent(line), line.strip()
+        if ind == base:
+            m = re.match(r"^([\w-]+)\s*:\s*(.*)$", stripped)
+            if not m:
+                return {}, f"unexpected line in the trigger block: {stripped[:40]}"
+            current, in_paths = m.group(1), False
+            events.setdefault(current, [])
+        elif current is None:
+            return {}, f"unexpected line in the trigger block: {stripped[:40]}"
+        elif (m := re.match(r"^paths\s*:\s*(.*)$", stripped)):
+            in_paths = True
+            events[current] += _inline_list(m.group(1))
+        elif stripped.startswith("- ") and in_paths:
+            events[current].append(stripped[2:].strip().strip("'\""))
+        elif re.match(r"^[\w-]+\s*:", stripped):
+            in_paths = False
+    # A leading `!` marks an exclusion; a filter made only of exclusions cannot
+    # be said to match nothing.
+    return {e: [p for p in ps if not p.startswith("!")] for e, ps in events.items()}, ""
+
+
+def check_wiring(root: Path, cfg: dict) -> None:
+    listings: dict[Path, list[str]] = {}
+
+    def files_of(repo: Path) -> list[str]:
+        if repo not in listings:
+            listings[repo] = [p.relative_to(repo).as_posix()
+                              for p in repo.rglob("*")
+                              if p.is_file() and not excluded(p, root, cfg)]
+        return listings[repo]
+
+    workflows: dict[Path, list[Path]] = {}
+    for wf in root.glob(f"**/{WORKFLOW_DIR}/*.y*ml"):
+        if excluded(wf, root, cfg):
+            continue
+        workflows.setdefault(wf.parents[2], []).append(wf)
+
+    for repo, wfs in sorted(workflows.items()):
+        for wf in sorted(wfs):
+            seen("workflows")
+            text = read_text(wf, "workflows")
+            if text is None:
+                continue
+            events, note = workflow_triggers(text)
+            if note or not events:
+                skip("workflows", note or "no events declared")
+                add("SR-WIRE-004",
+                    f"workflow triggers not read statically ({note or 'no events'}) "
+                    f"— whether anything starts it was not checked", rel(wf, root))
+                continue
+            check("workflows")
+            if set(events) <= MANUAL_ONLY:
+                add("SR-WIRE-001",
+                    f"nothing in the repository starts this workflow; it runs "
+                    f"only when someone starts it by hand ({', '.join(sorted(events))})",
+                    rel(wf, root))
+                continue
+            for event, filters in sorted(events.items()):
+                if not filters:
+                    continue
+                if not any(glob_re(f).match(p) for f in filters
+                           for p in files_of(repo)):
+                    add("SR-WIRE-002",
+                        f"the {event} filter matches no file in the repository "
+                        f"({', '.join(filters)})", rel(wf, root))
+
+    # A document saying a thing runs by itself, and no workflow, hook or script
+    # that names it. The automation wording is what makes it checkable: a script
+    # somebody runs by hand is not a defect, and this rule must not report one.
+    wired = "\n".join(
+        t for p in list(root.rglob("*.yml")) + list(root.rglob("*.yaml"))
+        + list(root.rglob("*.sh")) + list(root.rglob("*.json"))
+        if not excluded(p, root, cfg) and (t := read_or_none(p)) is not None)
+    span = re.compile(r"`([^`\s]+\.(?:sh|py))`")
+    for pr in [root] + projects(root, cfg):
+        for n in cfg["instruction_files"]:
+            f = pr / n
+            if not f.is_file():
+                continue
+            text = read_or_none(f)
+            if text is None:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if not AUTOMATION.search(line):
+                    continue
+                for raw in sorted(set(span.findall(line))):
+                    target = next((c for c in (f.parent / raw, pr / raw, root / raw)
+                                   if c.is_file()), None)
+                    if target is None:
+                        continue        # a missing file is SR-REF-001's business
+                    seen("wiring")
+                    check("wiring")
+                    if Path(raw).name in wired:
+                        continue
+                    add("SR-WIRE-003",
+                        f"described as running by itself, and named by no "
+                        f"workflow, hook or script: {raw}", rel(f, root), lineno)
+
+
+def read_or_none(p: Path) -> str | None:
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 # 3. Paths quoted in instruction files still resolve. The resolution rules were
@@ -822,6 +1009,7 @@ def main() -> int:
     cfg, applied = load_config(root)
     settings = check_settings_valid(root, cfg)
     check_hooks(root, settings, execute)
+    check_wiring(root, cfg)
     declared_dirs = check_paths(root, cfg)
     check_declared_but_empty(root, cfg, declared_dirs)
     check_stale_rows(root, cfg)
